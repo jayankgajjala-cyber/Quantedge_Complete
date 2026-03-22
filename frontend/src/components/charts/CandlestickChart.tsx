@@ -3,6 +3,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { createChart, ColorType, CrosshairMode, LineStyle } from "lightweight-charts";
 import type { IChartApi, ISeriesApi } from "lightweight-charts";
 import { useOHLCV } from "@/hooks/useData";
+import { createChart, ColorType, UTCTimestamp } from "lightweight-charts";
 
 interface CandlestickChartProps {
   ticker: string;
@@ -114,9 +115,9 @@ export default function CandlestickChart({
     });
 
     // Parse bars
-    interface Bar { time: number; open: number; high: number; low: number; close: number; volume: number; }
+    interface Bar { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number; }
     const bars: Bar[] = rawBars.map((b: any) => ({
-      time:   Math.floor(new Date(b.timestamp).getTime() / 1000) as any,
+      time: Math.floor(new Date(item.timestamp).getTime() / 1000) as UTCTimestamp,
       open:   b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
     })).sort((a: Bar, b: Bar) => a.time - b.time);
 
