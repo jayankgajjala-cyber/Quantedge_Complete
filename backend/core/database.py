@@ -112,7 +112,8 @@ def _register_all_models():
 def init_db() -> None:
     _register_all_models()
     try:
-        Base.metadata.create_all(bind=engine)
+        # Use checkfirst=True to skip already-existing types and tables
+        Base.metadata.create_all(bind=engine, checkfirst=True)
         logger.info("Database initialised — all tables verified")
     except Exception as exc:
         logger.critical("Database init failed: %s", exc, exc_info=True)
