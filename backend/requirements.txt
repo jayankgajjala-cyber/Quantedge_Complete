@@ -1,0 +1,56 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Quantedge Trading System — Unified Requirements v9.2
+#  All 7 deployment fixes applied
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Core Framework ────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.3.4
+python-multipart==0.0.9
+aiofiles==23.2.1
+
+# ── Database (FIX 1 + FIX 7: PostgreSQL driver) ───────────────────
+sqlalchemy==2.0.30
+alembic==1.13.1
+psycopg2-binary==2.9.9           # FIX 7: PostgreSQL C driver for Supabase/Neon/Railway
+
+# ── Auth & Security ───────────────────────────────────────────────
+passlib[bcrypt]==1.7.4
+PyJWT==2.8.0
+httpx==0.27.0                    # async HTTP for Resend OTP delivery
+python-dotenv==1.0.1
+
+# ── Data & Numerics ───────────────────────────────────────────────
+yfinance==0.2.40
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+scikit-learn==1.5.0
+pyarrow==16.1.0                  # FIX 6: parquet read/write for /tmp/parquet cache
+
+# ── Web Scraping (FIX 3: dual Cloudflare bypass) ──────────────────
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2
+cloudscraper==1.2.71             # FIX 3: Cloudflare bypass (fallback when SCRAPERAPI_KEY unset)
+
+# ── TradingView Technical Analysis (Source D) ─────────────────────
+tradingview-ta==3.3.0
+# If build fails: pip install tradingview-ta --no-build-isolation
+
+# ── Scheduling (FIX 4: timezone=Asia/Kolkata) ─────────────────────
+apscheduler==3.10.4
+
+# ── Development / Testing ─────────────────────────────────────────
+pytest==8.2.2
+pytest-asyncio==0.23.7
+
+# ═══════════════════════════════════════════════════════════════════
+# INSTALL:  pip install -r requirements.txt
+# NOTES:
+#   psycopg2-binary — includes C PostgreSQL driver, no extra system libs
+#   cloudscraper    — Cloudflare bypass when SCRAPERAPI_KEY is not set
+#   tradingview-ta  — may need: pip install tradingview-ta --no-build-isolation
+# ═══════════════════════════════════════════════════════════════════
