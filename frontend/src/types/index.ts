@@ -118,6 +118,9 @@ export interface FullResearch {
   insufficient_coverage: boolean;
   coverage_message: string | null;
   analysed_at: string;
+  positive_count: number;
+  neutral_count: number;
+  negative_count: number;
 }
 
 // ── Strategy Performance ──────────────────────────────────────────────────────
