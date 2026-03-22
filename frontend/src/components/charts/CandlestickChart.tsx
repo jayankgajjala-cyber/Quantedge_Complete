@@ -117,7 +117,7 @@ export default function CandlestickChart({
     // Parse bars
     interface Bar { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number; }
     const bars: Bar[] = rawBars.map((b: any) => ({
-      time: Math.floor(new Date(item.timestamp).getTime() / 1000) as UTCTimestamp,
+      time: Math.floor(new Date(b.timestamp).getTime() / 1000) as UTCTimestamp,
       open:   b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
     })).sort((a: Bar, b: Bar) => a.time - b.time);
 
