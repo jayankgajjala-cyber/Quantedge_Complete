@@ -3,7 +3,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { createChart, ColorType, CrosshairMode, LineStyle } from "lightweight-charts";
 import type { IChartApi, ISeriesApi } from "lightweight-charts";
 import { useOHLCV } from "@/hooks/useData";
-import { createChart, ColorType, UTCTimestamp } from "lightweight-charts";
+import {UTCTimestamp } from "lightweight-charts";
 
 interface CandlestickChartProps {
   ticker: string;
