@@ -11,6 +11,7 @@ Other:  yfinance cache dir set to /tmp/yf_cache on startup.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -350,12 +351,18 @@ app = FastAPI(
 )
 
 # FIX 5: CORS — explicit origin list from FRONTEND_URL, not wildcard
-_cors_origins = [o.strip() for o in cfg.FRONTEND_URL.split(",") if o.strip()]
+# Read from CORS_ORIGINS first, fall back to FRONTEND_URL
+_raw_origins = os.environ.get(
+    "CORS_ORIGINS",
+    cfg.FRONTEND_URL
+)
+_cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_allow_all    = "*" in _cors_origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = _cors_origins,
-    allow_credentials = True,          # Safe because origins are now explicit
+    allow_origins     = ["*"] if _allow_all else _cors_origins,
+    allow_credentials = False if _allow_all else True,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
