@@ -130,11 +130,11 @@ export default function CandlestickChart({
       const ema200 = calcEMA(closes, 200);
 
       const ema50Series = chart.addLineSeries({
-        color: COLORS.ema50, lineWidth: 1.5,
+        color: COLORS.ema50, lineWidth: 2,
         title: "EMA 50", priceLineVisible: false,
       });
       const ema200Series = chart.addLineSeries({
-        color: COLORS.ema200, lineWidth: 1.5,
+        color: COLORS.ema200, lineWidth: 2,
         title: "EMA 200", priceLineVisible: false,
       });
 
