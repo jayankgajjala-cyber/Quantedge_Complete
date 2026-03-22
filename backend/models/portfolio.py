@@ -13,7 +13,7 @@ class DataQuality(str, enum.Enum):
     LOW_CONFIDENCE = "LOW CONFIDENCE"    # < 5 years
 
 
-class Interval(str, enum.Enum):
+class IntervalType(str, enum.Enum):
     ONE_MIN = "1min"
     DAILY   = "daily"
 
