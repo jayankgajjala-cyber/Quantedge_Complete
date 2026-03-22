@@ -47,7 +47,7 @@ class HistoricalData(Base):
     id           = Column(Integer, primary_key=True, autoincrement=True)
     holding_id   = Column(Integer, ForeignKey("holdings.id", ondelete="CASCADE"), nullable=False)
     symbol       = Column(String(50), nullable=False, index=True)
-    interval     = Column(Enum(Interval), nullable=False)
+    interval = Column(Enum(IntervalType, name="intervaltype"), nullable=False)
     timestamp    = Column(DateTime, nullable=False, index=True)
     open         = Column(Float, nullable=False)
     high         = Column(Float, nullable=False)
