@@ -106,6 +106,7 @@ export interface FullResearch {
   ticker: string;
   avg_sentiment_score: number | null;
   sentiment_label: string | null;
+  sentiment_std_dev: number | null;
   conflict_detected: boolean;
   conflict_detail: string | null;
   executive_summary: string[];
@@ -115,14 +116,13 @@ export interface FullResearch {
   price_slope_annual: number | null;
   revenue_cagr: number | null;
   articles_analysed: number;
-  insufficient_coverage: boolean;
-  coverage_message: string | null;
-  analysed_at: string;
   positive_count: number;
   neutral_count: number;
   negative_count: number;
+  insufficient_coverage: boolean;
+  coverage_message: string | null;
+  analysed_at: string;
 }
-
 // ── Strategy Performance ──────────────────────────────────────────────────────
 
 export interface StrategyResult {
