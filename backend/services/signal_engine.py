@@ -214,6 +214,8 @@ def _persist_final(db, scan_id, ticker, d, regime_mode):
     ).first()
     sig_str  = d.get("signal", "HOLD").split("/")[0].strip().upper()
     sig_enum = SignalType(sig_str) if sig_str in SignalType._value2member_map_ else SignalType.HOLD
+    orig_str = d.get("original_signal", "")
+    orig_enum = SignalType(orig_str) if orig_str and orig_str in SignalType._value2member_map_ else None
     fs = existing or FinalSignal()
     fs.scan_id              = scan_id
     fs.ticker               = ticker
@@ -235,7 +237,13 @@ def _persist_final(db, scan_id, ticker, d, regime_mode):
     fs.sentiment_score      = d.get("sentiment_score")
     fs.sentiment_label      = d.get("sentiment_label")
     fs.sentiment_override   = d.get("sentiment_override", False)
+    fs.original_signal      = orig_enum
     fs.reason               = d.get("reason", "")
+    # Persist source_confirmations as JSON text so the API can return it
+    confirmations = d.get("source_confirmations")
+    if confirmations:
+        import json as _json
+        fs.source_confirmations_json = _json.dumps(confirmations)
     fs.status               = SignalStatus.ACTIVE
     fs.generated_at         = datetime.utcnow()
     fs.expires_at           = datetime.utcnow() + timedelta(minutes=SIGNAL_TTL_MINUTES)

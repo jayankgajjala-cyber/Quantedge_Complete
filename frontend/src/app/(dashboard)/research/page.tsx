@@ -5,11 +5,11 @@ import {
   Newspaper, Search, AlertTriangle, TrendingUp, TrendingDown,
   Minus, Sparkles, BarChart3, RefreshCw, ExternalLink, Clock,
 } from "lucide-react";
-import { toast } from "sonner";
-import { useResearch, useNews } from "@/hooks/useData";
+import { useResearch, useNews, useInception } from "@/hooks/useData";
 import { cn, sentimentColor, timeAgo, fmtDate, regimeBadge } from "@/lib/utils";
 import { Card, CardHeader, CardContent, Badge, Skeleton, Empty } from "@/components/ui";
 import CandlestickChart from "@/components/charts/CandlestickChart";
+import InceptionBanner from "@/components/signals/InceptionBanner";
 import type { NewsArticle } from "@/types";
 
 const NIFTY_50 = [
@@ -46,12 +46,12 @@ export default function ResearchPage() {
   const [input, setInput]   = useState(ticker);
 
   const { data: research, isLoading: resLoading, mutate: mutateRes } = useResearch(ticker);
-  // FIX: Only fetch articles AFTER research has loaded.
-  // useResearch() calls NewsService.analyse() which persists NewsArticle rows in the DB.
-  // If we fetch articles in parallel, the DB may not have them yet on first load.
-  // Passing null until `research` exists ensures the articles endpoint is only hit
-  // after the news pipeline has run and committed the rows.
-  const { data: news, isLoading: newsLoading } = useNews(research ? ticker : null);
+  // KEY FIX: pass research?.ticker (not just !!research) as the gate.
+  // When ticker changes, `research` still holds the previous ticker's object for one
+  // render cycle (truthy but wrong ticker). Comparing research.ticker === ticker ensures
+  // we only fetch articles after NewsService.analyse() has actually run for THIS ticker.
+  const { data: news, isLoading: newsLoading } = useNews(ticker, research?.ticker);
+  const { data: inception } = useInception(ticker);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -105,6 +105,16 @@ export default function ResearchPage() {
           </button>
         ))}
       </div>
+
+      {/* Inception / data quality banner — shown when < 10 years of data */}
+      {inception && inception.is_inception && (
+        <InceptionBanner
+          quality={inception.quality}
+          qualityMessage={inception.quality_message}
+          isInception={inception.is_inception}
+          inceptionDate={inception.inception_date ?? undefined}
+        />
+      )}
 
       {/* Insufficient coverage */}
       {research?.insufficient_coverage && (

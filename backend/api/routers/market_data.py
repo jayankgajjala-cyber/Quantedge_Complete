@@ -152,6 +152,50 @@ def get_inception_info(ticker: str):
     )
 
 
+@router.get("/ohlcv/{ticker}", summary="OHLCV candlestick bars for a ticker (daily, parquet-cached)")
+def get_ohlcv_bars(
+    ticker: str,
+    limit:  int = Query(500, ge=50, le=2000),
+):
+    """
+    Returns daily OHLCV bars for a ticker as a JSON array.
+    Data is sourced from the parquet cache (yfinance, up to 10 years).
+    Used by CandlestickChart component on the Signals and Research pages.
+
+    Response shape: [{ timestamp, open, high, low, close, volume }, ...]
+    """
+    result = fetch_ohlcv(ticker.upper())
+    if result.df is None or result.df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No OHLCV data available for {ticker.upper()}. "
+                   f"Quality: {result.quality}. {result.quality_message}"
+        )
+
+    df = result.df.tail(limit).copy()
+    # Normalise index to plain date strings — lightweight-charts expects UTC seconds
+    df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+    bars = [
+        {
+            "timestamp": idx.isoformat(),
+            "open":      round(float(row["Open"]),   2),
+            "high":      round(float(row["High"]),   2),
+            "low":       round(float(row["Low"]),    2),
+            "close":     round(float(row["Close"]),  2),
+            "volume":    int(row["Volume"]),
+        }
+        for idx, row in df.iterrows()
+    ]
+    return {
+        "ticker":          ticker.upper(),
+        "bars":            bars,
+        "count":           len(bars),
+        "quality":         result.quality,
+        "inception_date":  result.inception_date.strftime("%d %b %Y") if result.inception_date else None,
+        "years_available": round(result.years_available, 2),
+    }
+
+
 @router.get("/all/{ticker}",
             summary="All four source results for one ticker (diagnostic / debug)")
 def get_all_sources(ticker: str):

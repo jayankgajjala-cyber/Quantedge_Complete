@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Settings, Server, Zap, Database, Key, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { runBacktest } from "@/hooks/useData";
 import { useAuthStore } from "@/lib/store";
 import { Card, CardHeader, CardContent, Badge } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -36,24 +37,23 @@ export default function SettingsPage() {
         : [];
 
       if (syms.length > 0) {
-        // FIXED: run backtest per ticker using the existing route
-        // GET /api/trading/backtest/run/{ticker}
+        // runBacktest uses apiSlow (120s timeout) — backtest takes 15-45s per ticker
         const results = await Promise.allSettled(
-          syms.map((ticker) => api.get(`/trading/backtest/run/${ticker}`))
+          syms.map((ticker) => runBacktest(ticker))
         );
         const succeeded = results.filter((r) => r.status === "fulfilled").length;
         toast.success(`Backtest complete: ${succeeded}/${syms.length} tickers processed`);
       } else {
-        // Run for all holdings
+        // Run for all holdings using the slow client
         const { data: holdings } = await api.get("/trading/portfolio/holdings");
         if (!holdings?.length) {
           toast.error("No holdings found. Upload a portfolio CSV first.");
           return;
         }
         toast.info(`Starting backtest for ${holdings.length} holdings — this may take a few minutes`);
-        // Fire and forget — run in background
+        // Fire-and-forget per ticker — each uses 120s timeout via runBacktest
         holdings.forEach((h: any) =>
-          api.get(`/trading/backtest/run/${h.symbol}`).catch(() => null)
+          runBacktest(h.symbol).catch(() => null)
         );
         toast.success("Backtest jobs dispatched for all holdings");
       }
@@ -67,13 +67,14 @@ export default function SettingsPage() {
   async function handleDetectRegime() {
     setDetecting(true);
     try {
-      // FIXED: was POST /api/quant/regime/detect-now (did not exist)
-      // Actual route: POST /api/dashboard/scan-now (triggers full scan including regime)
+      // POST /api/dashboard/scan-now now:
+      //   1. Calls detect_and_persist() first (fresh regime written to DB)
+      //   2. Runs signal scan (reads fresh regime)
+      //   3. Returns regime_label + regime_summary in the response body
+      // No second GET needed — the regime is in the scan response.
       const { data } = await api.post("/dashboard/scan-now");
-      // Also fetch the latest regime to show result
-      const { data: regime } = await api.get("/dashboard/regime");
-      toast.success(`Regime: ${regime?.regime_label ?? "Updated"}`, {
-        description: regime?.regime_summary ?? `${data.signals_count ?? 0} signals generated`,
+      toast.success(`Regime: ${data.regime_label ?? "Updated"}`, {
+        description: data.regime_summary ?? `${data.signals_count ?? 0} signals generated`,
       });
     } catch (err: any) {
       toast.error(err.response?.data?.detail || "Detection failed");

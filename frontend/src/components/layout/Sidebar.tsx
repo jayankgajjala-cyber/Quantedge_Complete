@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   BarChart3, Briefcase, FlaskConical, Newspaper,
   Settings, ChevronLeft, ChevronRight, LogOut,
-  TrendingUp, Zap,
+  TrendingUp, Zap, Trophy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/lib/store";
@@ -13,11 +13,12 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 
 const NAV = [
-  { href: "/",               label: "Portfolio",      icon: Briefcase,   desc: "Holdings & P&L" },
-  { href: "/signals",        label: "Market Signals", icon: Zap,         desc: "Live regime signals" },
-  { href: "/research",       label: "News Research",  icon: Newspaper,   desc: "AI sentiment feed" },
-  { href: "/paper-trading",  label: "Paper Trading",  icon: FlaskConical, desc: "Simulated trades" },
-  { href: "/settings",       label: "Settings",       icon: Settings,    desc: "Configuration" },
+  { href: "/",             label: "Portfolio",      icon: Briefcase,    desc: "Holdings & P&L" },
+  { href: "/signals",      label: "Market Signals", icon: Zap,          desc: "Live regime signals" },
+  { href: "/research",     label: "News Research",  icon: Newspaper,    desc: "AI sentiment feed" },
+  { href: "/paper-trading",label: "Paper Trading",  icon: FlaskConical, desc: "Simulated trades" },
+  { href: "/leaderboard",  label: "Leaderboard",    icon: Trophy,       desc: "Strategy rankings" },
+  { href: "/settings",     label: "Settings",       icon: Settings,     desc: "Configuration" },
 ];
 
 export default function Sidebar() {

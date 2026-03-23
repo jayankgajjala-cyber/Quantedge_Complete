@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
-import { FlaskConical, Plus, X, TrendingUp, TrendingDown, DollarSign, Loader2 } from "lucide-react";
+import { FlaskConical, Plus, TrendingUp, TrendingDown, DollarSign, Loader2, Wallet, PieChart, Target } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { usePaperTrades } from "@/hooks/useData";
+import { usePaperTrades, useBudget } from "@/hooks/useData";
 import { cn, fmt, fmtPct, fmtCurrency, fmtDate } from "@/lib/utils";
 import { Card, CardHeader, CardContent, StatCard, Skeleton, Empty, Badge, Tabs } from "@/components/ui";
 import type { PaperTrade } from "@/types";
@@ -16,6 +16,7 @@ export default function PaperTradingPage() {
   const [exitPrice, setExitPrice] = useState("");
 
   const { data: trades, isLoading, mutate } = usePaperTrades(statusTab);
+  const { data: budget } = useBudget();
 
   const [form, setForm] = useState({
     symbol: "", direction: "BUY", quantity: "", entry_price: "",
@@ -31,7 +32,8 @@ export default function PaperTradingPage() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await api.post("/paper-trades/", {
+      // FIX: was /paper-trades/ → correct route is /trading/paper/open
+      await api.post("/trading/paper/open", {
         symbol:        form.symbol.toUpperCase(),
         direction:     form.direction,
         quantity:      parseFloat(form.quantity),
@@ -53,7 +55,8 @@ export default function PaperTradingPage() {
     if (!exitPrice) { toast.error("Enter exit price"); return; }
     setClosing(id);
     try {
-      await api.post(`/paper-trades/${id}/close`, { exit_price: parseFloat(exitPrice) });
+      // FIX: was /paper-trades/${id}/close → correct route is /trading/paper/${id}/close
+      await api.post(`/trading/paper/${id}/close`, { exit_price: parseFloat(exitPrice) });
       toast.success("Trade closed");
       mutate();
       setClosing(null);
@@ -89,6 +92,86 @@ export default function PaperTradingPage() {
           value={closedTrades.length > 0 ? `${((winners / closedTrades.length) * 100).toFixed(0)}%` : "—"}
           icon={<TrendingUp size={15} />} trend="neutral" />
       </div>
+
+      {/* Monthly Budget Panel — GET /api/trading/paper/budget */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold flex items-center gap-1.5">
+              <Wallet size={13} className="text-muted-foreground" />
+              Monthly Budget — ₹{budget ? fmt(budget.total_budget, 0) : "15,000"}
+            </span>
+            {budget && (
+              <span className={cn(
+                "text-[10px] font-bold px-2 py-0.5 rounded-full border",
+                budget.utilisation_pct >= 80
+                  ? "text-bear bg-bear/10 border-bear/20"
+                  : budget.utilisation_pct >= 50
+                  ? "text-gold bg-gold/10 border-gold/20"
+                  : "text-bull bg-bull/10 border-bull/20"
+              )}>
+                {budget.utilisation_pct.toFixed(0)}% used
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {!budget ? (
+            <div className="space-y-3">
+              <Skeleton className="h-3 w-full" />
+              <div className="grid grid-cols-3 gap-3">
+                {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-10" />)}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Budget utilisation bar */}
+              <div>
+                <div className="flex justify-between text-[10px] text-muted-foreground mb-1.5">
+                  <span>Allocated: {fmtCurrency(budget.allocated)}</span>
+                  <span>Remaining: {fmtCurrency(budget.remaining)}</span>
+                </div>
+                <div className="h-2 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-all",
+                      budget.utilisation_pct >= 80 ? "bg-bear"
+                      : budget.utilisation_pct >= 50 ? "bg-gold"
+                      : "bg-bull"
+                    )}
+                    style={{ width: `${Math.min(100, budget.utilisation_pct)}%` }}
+                  />
+                </div>
+              </div>
+              {/* Budget detail grid */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  {
+                    label: "Remaining",
+                    value: fmtCurrency(budget.remaining),
+                    color: budget.remaining < 2000 ? "text-bear" : "text-bull",
+                  },
+                  {
+                    label: "Realised P&L",
+                    value: fmtCurrency(budget.realised_pnl),
+                    color: budget.realised_pnl >= 0 ? "text-bull" : "text-bear",
+                  },
+                  {
+                    label: "Open / Closed",
+                    value: `${budget.open_trades} / ${budget.closed_trades}`,
+                    color: "text-foreground",
+                  },
+                ].map(({ label, value, color }) => (
+                  <div key={label} className="bg-muted/30 rounded-xl p-2.5 border border-border/40 text-center">
+                    <div className="text-[9px] text-muted-foreground uppercase tracking-widest mb-1">{label}</div>
+                    <div className={cn("text-xs font-mono font-bold", color)}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* New trade form */}
       {showForm && (

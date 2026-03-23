@@ -9,15 +9,16 @@ GET  /api/dashboard/signals       → latest FinalSignals (with sentiment overla
 GET  /api/dashboard/signals/{ticker} → signal history for one ticker
 POST /api/dashboard/scan-now      → force immediate signal scan
 GET  /api/dashboard/research/{ticker} → full news + sentiment + forecast
+GET  /api/dashboard/research/{ticker}/articles → raw news articles
 GET  /api/dashboard/leaderboard   → top strategies by Sharpe
 """
 
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
@@ -26,9 +27,12 @@ from backend.core.auth     import get_current_user
 from backend.core.database import get_db
 from backend.models.backtest  import StrategyPerformance
 from backend.models.news      import NewsAnalysis, NewsArticle as NewsArticleModel
+from backend.models.portfolio import DataQuality
 from backend.models.regime    import MarketRegime
 from backend.models.signals   import FinalSignal, SignalStatus, SignalType
+from backend.models.alerts           import AlertDispatchLog
 from backend.services.news_service   import get_news_service
+from backend.services.regime_service import get_regime_service
 from backend.services.signal_engine  import get_signal_engine
 
 logger = logging.getLogger(__name__)
@@ -45,49 +49,67 @@ class RegimeOut(BaseModel):
     id:               int
     timestamp:        datetime
     regime_label:     str
-    adx_14:           Optional[float]
-    atr_percentile:   Optional[float]
-    ema_200:          Optional[float]
-    close_price:      Optional[float]
-    price_vs_ema:     Optional[str]
-    regime_summary:   Optional[str]
-    confidence_score: Optional[float]
+    adx_14:           Optional[float] = None
+    atr_percentile:   Optional[float] = None
+    ema_200:          Optional[float] = None
+    close_price:      Optional[float] = None
+    price_vs_ema:     Optional[str]   = None
+    regime_summary:   Optional[str]   = None
+    confidence_score: Optional[float] = None
     class Config: from_attributes = True
 
 
 class SignalOut(BaseModel):
+    id:                   int
+    scan_id:              str
     ticker:               str
     regime:               str
     selected_strategy:    str
     signal:               str
     confidence:           float
-    entry_price:          Optional[float]
-    stop_loss:            Optional[float]
-    target_1:             Optional[float]
-    target_2:             Optional[float]
-    agreeing_strategies:  Optional[int]
-    sentiment_score:      Optional[float]
-    sentiment_label:      Optional[str]
-    sentiment_override:   Optional[bool]
-    original_signal:      Optional[str]
-    bias_warning:         Optional[bool]
+    entry_price:          Optional[float] = None
+    stop_loss:            Optional[float] = None
+    target_1:             Optional[float] = None
+    target_2:             Optional[float] = None
+    risk_reward_ratio:    Optional[float] = None
+    adx:                  Optional[float] = None
+    rsi:                  Optional[float] = None
+    volume_ratio:         Optional[float] = None
+    agreeing_strategies:  Optional[int]   = None
+    total_strategies_run: Optional[int]   = None
+    agreement_bonus:      Optional[float] = None
+    sentiment_score:      Optional[float] = None
+    sentiment_label:      Optional[str]   = None
+    sentiment_override:   Optional[bool]  = None
+    original_signal:      Optional[str]   = None
+    bias_warning:         Optional[bool]  = None
+    bias_message:         Optional[str]   = None
+    source_confirmations: Optional[dict]  = None
     reason:               str
+    status:               str
     generated_at:         datetime
-    class Config: from_attributes = True
+    expires_at:           Optional[datetime] = None
 
 
 class ResearchOut(BaseModel):
     ticker:               str
-    avg_sentiment_score:  Optional[float]
-    sentiment_label:      Optional[str]
+    avg_sentiment_score:  Optional[float] = None
+    sentiment_label:      Optional[str]   = None
+    sentiment_std_dev:    Optional[float] = None
     conflict_detected:    bool
-    conflict_detail:      Optional[str]
+    conflict_detail:      Optional[str]   = None
     executive_summary:    list[str]
-    forecast_outlook:     Optional[str]
-    forecast_direction:   Optional[str]
+    forecast_outlook:     Optional[str]   = None
+    forecast_direction:   Optional[str]   = None
+    forecast_confidence:  Optional[float] = None
+    price_slope_annual:   Optional[float] = None
+    revenue_cagr:         Optional[float] = None
     articles_analysed:    int
+    positive_count:       int
+    neutral_count:        int
+    negative_count:       int
     insufficient_coverage: bool
-    coverage_message:     Optional[str]
+    coverage_message:     Optional[str]   = None
     analysed_at:          datetime
 
 
@@ -95,41 +117,94 @@ class LeaderboardEntry(BaseModel):
     rank:          int
     stock_ticker:  str
     strategy_name: str
-    sharpe_ratio:  Optional[float]
-    cagr:          Optional[float]
-    win_rate:      Optional[float]
-    max_drawdown:  Optional[float]
-    years_of_data: Optional[float]
+    sharpe_ratio:  Optional[float] = None
+    cagr:          Optional[float] = None
+    win_rate:      Optional[float] = None
+    max_drawdown:  Optional[float] = None
+    years_of_data: Optional[float] = None
+    data_quality:  str = "UNKNOWN"
 
 
 class NewsArticleOut(BaseModel):
-    """Single news article with sentiment score — returned by /research/{ticker}/articles."""
     title:           str
     source_name:     str
     published_at:    datetime
-    url:             Optional[str]
-    description:     Optional[str]
-    sentiment_score: Optional[float]
-    sentiment_label: Optional[str]
+    url:             Optional[str]   = None
+    description:     Optional[str]   = None
+    sentiment_score: Optional[float] = None
+    sentiment_label: Optional[str]   = None
     class Config: from_attributes = True
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _signal_to_out(r: FinalSignal) -> SignalOut:
+    """Safely serialise a FinalSignal ORM row to SignalOut."""
+    confirmations: Optional[dict] = None
+    if getattr(r, "source_confirmations_json", None):
+        try:
+            confirmations = json.loads(r.source_confirmations_json)
+        except Exception:
+            pass
+
+    return SignalOut(
+        id                   = r.id,
+        scan_id              = r.scan_id,
+        ticker               = r.ticker,
+        regime               = r.regime.value if hasattr(r.regime, "value") else str(r.regime),
+        selected_strategy    = r.selected_strategy,
+        signal               = r.signal.value if hasattr(r.signal, "value") else str(r.signal),
+        confidence           = r.confidence,
+        entry_price          = r.entry_price,
+        stop_loss            = r.stop_loss,
+        target_1             = r.target_1,
+        target_2             = r.target_2,
+        risk_reward_ratio    = r.risk_reward_ratio,
+        adx                  = r.adx,
+        rsi                  = r.rsi,
+        volume_ratio         = r.volume_ratio,
+        agreeing_strategies  = r.agreeing_strategies,
+        total_strategies_run = r.total_strategies_run,
+        agreement_bonus      = r.agreement_bonus,
+        sentiment_score      = r.sentiment_score,
+        sentiment_label      = r.sentiment_label,
+        sentiment_override   = r.sentiment_override,
+        original_signal      = (
+            r.original_signal.value
+            if r.original_signal and hasattr(r.original_signal, "value")
+            else r.original_signal
+        ),
+        bias_warning         = r.bias_warning,
+        bias_message         = r.bias_message,
+        source_confirmations = confirmations,
+        reason               = r.reason or "",
+        status               = r.status.value if hasattr(r.status, "value") else str(r.status),
+        generated_at         = r.generated_at,
+        expires_at           = r.expires_at,
+    )
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
-    regime = (db.query(MarketRegime)
-               .order_by(desc(MarketRegime.timestamp)).first())
+    regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
-    subq = (db.query(
-                FinalSignal.ticker,
-                func.max(FinalSignal.generated_at).label("latest"),
-            ).group_by(FinalSignal.ticker).subquery())
-    signals = (db.query(FinalSignal)
-                 .join(subq, (FinalSignal.ticker == subq.c.ticker) &
-                             (FinalSignal.generated_at == subq.c.latest))
-                 .filter(FinalSignal.status == SignalStatus.ACTIVE)
-                 .all())
+    subq = (
+        db.query(
+            FinalSignal.ticker,
+            func.max(FinalSignal.generated_at).label("latest"),
+        )
+        .group_by(FinalSignal.ticker)
+        .subquery()
+    )
+    signals = (
+        db.query(FinalSignal)
+        .join(subq, (FinalSignal.ticker == subq.c.ticker) &
+                    (FinalSignal.generated_at == subq.c.latest))
+        .filter(FinalSignal.status == SignalStatus.ACTIVE)
+        .all()
+    )
 
     buy_count  = sum(1 for s in signals if s.signal == SignalType.BUY)
     sell_count = sum(1 for s in signals if s.signal == SignalType.SELL)
@@ -137,8 +212,17 @@ def get_dashboard(db: Session = Depends(get_db)):
 
     top_buys = sorted(
         [s for s in signals if s.signal == SignalType.BUY],
-        key=lambda s: s.confidence, reverse=True
+        key=lambda s: s.confidence, reverse=True,
     )[:10]
+
+    # Use _signal_to_out so top_signals have the full shape the frontend type expects
+    top_signals_out = [_signal_to_out(s).model_dump() for s in top_buys]
+
+    # Compute global bias flag
+    total_sigs = len(signals)
+    hold_sigs  = sum(1 for s in signals if s.signal == SignalType.HOLD)
+    bias_flag  = total_sigs > 0 and (hold_sigs / total_sigs) >= 0.80
+    bias_msg   = f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced" if bias_flag else ""
 
     return {
         "regime":             regime.regime_label.value if regime else "UNKNOWN",
@@ -147,38 +231,58 @@ def get_dashboard(db: Session = Depends(get_db)):
         "total_buy_signals":  buy_count,
         "total_sell_signals": sell_count,
         "total_hold_signals": hold_count,
-        "top_signals":        [s.to_frontend_json() for s in top_buys],
+        "top_signals":        top_signals_out,
+        "bias_warning":       bias_flag,
+        "bias_message":       bias_msg,
         "last_scan_at":       signals[0].generated_at.isoformat() if signals else None,
     }
 
 
-@router.get("/regime", response_model=RegimeOut,
-            summary="Latest Nifty 50 market regime snapshot")
+@router.get("/regime", response_model=RegimeOut, summary="Latest Nifty 50 market regime snapshot")
 def get_regime(db: Session = Depends(get_db)):
     row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
     if not row:
         raise HTTPException(404, "No regime data yet. Scheduler runs every 5 minutes.")
-    return RegimeOut.from_orm(row)
+    return RegimeOut(
+        id               = row.id,
+        timestamp        = row.timestamp,
+        regime_label     = row.regime_label.value if hasattr(row.regime_label, "value") else str(row.regime_label),
+        adx_14           = row.adx_14,
+        atr_percentile   = row.atr_percentile,
+        ema_200          = row.ema_200,
+        close_price      = row.close_price,
+        price_vs_ema     = row.price_vs_ema,
+        regime_summary   = row.regime_summary,
+        confidence_score = row.confidence_score,
+    )
 
 
 @router.get("/signals", response_model=list[SignalOut],
             summary="Latest FinalSignals for all holdings (with sentiment overlay)")
 def get_latest_signals(
-    signal_filter: Optional[str] = Query(None, alias="signal"),
-    min_confidence: float        = Query(0.0, ge=0, le=100),
-    limit:          int          = Query(50, ge=1, le=200),
-    db:             Session      = Depends(get_db),
+    signal_filter:  Optional[str] = Query(None, alias="signal"),
+    min_confidence: float         = Query(0.0, ge=0, le=100),
+    limit:          int           = Query(50, ge=1, le=200),
+    db:             Session       = Depends(get_db),
 ):
-    subq = (db.query(
-                FinalSignal.ticker,
-                func.max(FinalSignal.generated_at).label("latest"),
-            ).group_by(FinalSignal.ticker).subquery())
+    subq = (
+        db.query(
+            FinalSignal.ticker,
+            func.max(FinalSignal.generated_at).label("latest"),
+        )
+        .group_by(FinalSignal.ticker)
+        .subquery()
+    )
 
-    q = (db.query(FinalSignal)
-           .join(subq, (FinalSignal.ticker == subq.c.ticker) &
-                       (FinalSignal.generated_at == subq.c.latest))
-           .filter(FinalSignal.status   == SignalStatus.ACTIVE,
-                   FinalSignal.confidence >= min_confidence))
+    q = (
+        db.query(FinalSignal)
+        .join(subq, (FinalSignal.ticker == subq.c.ticker) &
+                    (FinalSignal.generated_at == subq.c.latest))
+        .filter(
+            FinalSignal.status    == SignalStatus.ACTIVE,
+            FinalSignal.confidence >= min_confidence,
+        )
+    )
 
     if signal_filter:
         try:
@@ -187,7 +291,7 @@ def get_latest_signals(
             raise HTTPException(400, f"Invalid signal type '{signal_filter}'")
 
     rows = q.order_by(desc(FinalSignal.confidence)).limit(limit).all()
-    return [SignalOut.from_orm(r) for r in rows]
+    return [_signal_to_out(r) for r in rows]
 
 
 @router.get("/signals/{ticker}", response_model=list[SignalOut],
@@ -197,29 +301,61 @@ def get_ticker_signals(
     limit:  int     = Query(20, ge=1, le=100),
     db:     Session = Depends(get_db),
 ):
-    rows = (db.query(FinalSignal)
-              .filter(FinalSignal.ticker == ticker.upper())
-              .order_by(desc(FinalSignal.generated_at))
-              .limit(limit).all())
+    rows = (
+        db.query(FinalSignal)
+        .filter(FinalSignal.ticker == ticker.upper())
+        .order_by(desc(FinalSignal.generated_at))
+        .limit(limit)
+        .all()
+    )
     if not rows:
         raise HTTPException(404, f"No signals for '{ticker.upper()}'. Run a scan first.")
-    return [SignalOut.from_orm(r) for r in rows]
+    return [_signal_to_out(r) for r in rows]
 
 
 @router.post("/scan-now", status_code=status.HTTP_200_OK,
-             summary="Trigger an immediate signal scan (all holdings)")
-def scan_now():
+             summary="Trigger an immediate signal scan + fresh regime detection")
+def scan_now(db: Session = Depends(get_db)):
     """
-    Runs the full pipeline synchronously:
-    Regime → QuantService → 8 strategies → Agreement → Sentiment override → FinalSignal
+    Two-phase synchronous pipeline:
+    1. Regime detection  — calls RegimeService.detect_and_persist() so the regime
+       written to DB is fresh (not the stale scheduler value from hours ago).
+    2. Signal scan       — SignalEngine.run_scan() reads the newly persisted regime.
+
+    Both phases run in the same request so the toast in the UI reflects the
+    actual regime that was just computed, not a cached one.
     """
     try:
+        # Phase 1 — always detect regime fresh before scanning signals
+        regime_svc = get_regime_service()
+        try:
+            new_regime = regime_svc.detect_and_persist()
+            logger.info(
+                "scan-now: regime freshly detected → %s",
+                new_regime.regime_label.value if new_regime else "unknown",
+            )
+        except Exception as regime_exc:
+            # Non-fatal: regime detection can fail (e.g. market closed, yfinance down)
+            # Signal scan will fall back to reading the last persisted regime from DB
+            logger.warning("scan-now: regime detection failed (non-fatal): %s", regime_exc)
+
+        # Phase 2 — run signal scan (reads regime from DB, now fresh from phase 1)
         engine  = get_signal_engine()
         results = engine.run_scan()
+
+        # Return fresh regime label for the toast in the frontend
+        regime_row = (
+            db.query(MarketRegime)
+            .order_by(desc(MarketRegime.timestamp))
+            .first()
+        )
+
         return {
-            "message":        f"Scan complete — {len(results)} signals generated",
-            "signals_count":  len(results),
-            "signals":        results,
+            "message":       f"Scan complete — {len(results)} signals generated",
+            "signals_count": len(results),
+            "signals":       results,
+            "regime_label":  regime_row.regime_label.value if regime_row else "UNKNOWN",
+            "regime_summary": regime_row.regime_summary if regime_row else None,
         }
     except Exception as exc:
         logger.error("on-demand scan failed: %s", exc, exc_info=True)
@@ -241,12 +377,19 @@ def get_research(ticker: str, db: Session = Depends(get_db)):
         ticker                = row.ticker,
         avg_sentiment_score   = row.avg_sentiment_score,
         sentiment_label       = row.sentiment_label.value if row.sentiment_label else None,
+        sentiment_std_dev     = row.sentiment_std_dev,
         conflict_detected     = row.conflict_detected,
         conflict_detail       = row.conflict_detail,
         executive_summary     = bullets,
         forecast_outlook      = row.forecast_outlook,
         forecast_direction    = row.forecast_direction,
+        forecast_confidence   = row.forecast_confidence,
+        price_slope_annual    = row.price_slope_annual,
+        revenue_cagr          = row.revenue_cagr,
         articles_analysed     = row.articles_analysed,
+        positive_count        = row.positive_count or 0,
+        neutral_count         = row.neutral_count  or 0,
+        negative_count        = row.negative_count or 0,
         insufficient_coverage = row.insufficient_coverage,
         coverage_message      = row.coverage_message,
         analysed_at           = row.analysed_at,
@@ -261,19 +404,17 @@ def get_news_articles(
     db:     Session = Depends(get_db),
 ):
     """
-    Returns persisted NewsArticle rows for a ticker, ordered latest-first.
-
-    Articles are stored by NewsService.analyse() when GET /research/{ticker}
-    is called. If no articles exist yet, returns an empty list — the frontend
-    calls /research/{ticker} first (useResearch hook), which triggers ingestion,
-    then calls this endpoint (useNews hook) to render the news feed.
+    Returns persisted NewsArticle rows ordered latest-first.
+    Articles are written by NewsService.analyse() when /research/{ticker} is hit.
+    Returns [] (not 404) if no articles exist yet — frontend calls /research first
+    which triggers ingestion, then calls /articles.
     """
     rows = (
         db.query(NewsArticleModel)
-          .filter(NewsArticleModel.ticker == ticker.upper())
-          .order_by(desc(NewsArticleModel.published_at))
-          .limit(limit)
-          .all()
+        .filter(NewsArticleModel.ticker == ticker.upper())
+        .order_by(desc(NewsArticleModel.published_at))
+        .limit(limit)
+        .all()
     )
     return [
         NewsArticleOut(
@@ -289,18 +430,54 @@ def get_news_articles(
     ]
 
 
+@router.get("/notifications", summary="Recent alert dispatch log (latest 20)")
+def get_notifications(
+    limit: int     = Query(20, ge=1, le=100),
+    db:    Session = Depends(get_db),
+):
+    """
+    Returns the most recent entries from alert_dispatch_log — real alerts
+    that the scheduler fired (signal emails, SL hits, regime changes).
+    Used by the Header notification dropdown to replace hardcoded static data.
+    Returns [] when no alerts have been dispatched yet.
+    """
+    rows = (
+        db.query(AlertDispatchLog)
+        .order_by(desc(AlertDispatchLog.sent_at))
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id":          r.id,
+            "ticker":      r.ticker,
+            "signal_type": r.signal_type,
+            "confidence":  r.confidence,
+            "regime":      r.regime,
+            "channel":     r.channel,
+            "subject":     r.subject,
+            "delivered":   r.delivered,
+            "sent_at":     r.sent_at.isoformat() if r.sent_at else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/leaderboard", response_model=list[LeaderboardEntry],
             summary="Top strategies ranked by Sharpe Ratio")
 def get_leaderboard(
-    top_n:  int     = Query(20, ge=1, le=100),
-    db:     Session = Depends(get_db),
+    top_n:         int  = Query(20, ge=1, le=100),
+    all_qualities: bool = Query(False),
+    db:            Session = Depends(get_db),
 ):
-    from backend.models.portfolio import DataQuality
-    rows = (db.query(StrategyPerformance)
-              .filter(StrategyPerformance.data_quality == DataQuality.SUFFICIENT,
-                      StrategyPerformance.sharpe_ratio.isnot(None))
-              .order_by(desc(StrategyPerformance.sharpe_ratio))
-              .limit(top_n).all())
+    q = db.query(StrategyPerformance).filter(
+        StrategyPerformance.sharpe_ratio.isnot(None)
+    )
+    # By default only return SUFFICIENT data quality rows; pass all_qualities=true for full table
+    if not all_qualities:
+        q = q.filter(StrategyPerformance.data_quality == DataQuality.SUFFICIENT)
+
+    rows = q.order_by(desc(StrategyPerformance.sharpe_ratio)).limit(top_n).all()
     return [
         LeaderboardEntry(
             rank          = i + 1,
@@ -311,6 +488,7 @@ def get_leaderboard(
             win_rate      = r.win_rate,
             max_drawdown  = r.max_drawdown,
             years_of_data = r.years_of_data,
+            data_quality  = r.data_quality.value if hasattr(r.data_quality, "value") else str(r.data_quality),
         )
         for i, r in enumerate(rows)
     ]

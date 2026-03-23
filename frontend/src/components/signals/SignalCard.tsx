@@ -1,8 +1,9 @@
 "use client";
-import { ChevronDown, ChevronUp, Target, ShieldAlert, TrendingUp, Users } from "lucide-react";
+import { ChevronDown, ChevronUp, ShieldAlert } from "lucide-react";
 import { useState } from "react";
-import { cn, signalBg, fmtCurrency, fmt, regimeBadge, timeAgo } from "@/lib/utils";
-import { ConfidenceBar, Badge } from "@/components/ui";
+import { cn, signalBg, fmt, regimeBadge, timeAgo } from "@/lib/utils";
+import { ConfidenceBar } from "@/components/ui";
+import AuditTrail from "@/components/signals/AuditTrail";
 import type { FinalSignal } from "@/types";
 
 interface SignalCardProps {
@@ -19,10 +20,8 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
       "bg-card border rounded-2xl overflow-hidden transition-all hover:border-primary/20",
       signal.bias_warning ? "border-gold/30" : "border-border",
     )}>
-      {/* Main row */}
       <div className="p-4">
         <div className="flex items-start gap-3">
-          {/* Ticker avatar */}
           <button
             onClick={() => onSelectTicker?.(signal.ticker)}
             className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0 hover:bg-primary/20 transition-colors">
@@ -35,9 +34,14 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
               <span className={cn("text-[10px] font-bold px-2.5 py-0.5 rounded-full border", signalBg(signal.signal))}>
                 {signal.signal}
               </span>
-              {signal.agreement_bonus && signal.agreement_bonus > 0 && (
+              {signal.agreement_bonus != null && signal.agreement_bonus > 0 && (
                 <span className="text-[9px] bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 rounded-full font-bold">
                   +{signal.agreement_bonus.toFixed(0)} AGREE
+                </span>
+              )}
+              {signal.sentiment_override && (
+                <span className="text-[9px] bg-gold/10 text-gold border border-gold/20 px-1.5 py-0.5 rounded-full font-bold">
+                  SENTIMENT OVERRIDE
                 </span>
               )}
             </div>
@@ -52,7 +56,6 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
             <ConfidenceBar value={signal.confidence} className="mt-2.5 max-w-[180px]" />
           </div>
 
-          {/* Price box */}
           {signal.entry_price && (
             <div className="text-right shrink-0 hidden sm:block">
               <div className="text-xs font-mono font-bold">₹{fmt(signal.entry_price)}</div>
@@ -68,8 +71,7 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
           </button>
         </div>
 
-        {/* Indicators row */}
-        <div className="flex gap-4 mt-3 pt-3 border-t border-border/40">
+        <div className="flex gap-4 mt-3 pt-3 border-t border-border/40 flex-wrap">
           {signal.adx != null && (
             <div className="text-center">
               <div className="text-[9px] text-muted-foreground uppercase tracking-widest">ADX</div>
@@ -100,7 +102,16 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
             <div className="text-center">
               <div className="text-[9px] text-muted-foreground uppercase tracking-widest">Agree</div>
               <div className="text-xs font-mono font-bold text-primary">
-                {signal.agreeing_strategies}/{signal.total_strategies_run}
+                {signal.agreeing_strategies}/{signal.total_strategies_run ?? "?"}
+              </div>
+            </div>
+          )}
+          {signal.sentiment_score != null && (
+            <div className="text-center">
+              <div className="text-[9px] text-muted-foreground uppercase tracking-widest">Sentiment</div>
+              <div className={cn("text-xs font-mono font-bold",
+                signal.sentiment_score > 0.3 ? "text-bull" : signal.sentiment_score < -0.3 ? "text-bear" : "text-gold")}>
+                {signal.sentiment_score >= 0 ? "+" : ""}{signal.sentiment_score.toFixed(2)}
               </div>
             </div>
           )}
@@ -110,38 +121,49 @@ export default function SignalCard({ signal, onSelectTicker }: SignalCardProps) 
         </div>
       </div>
 
-      {/* Expanded details */}
       {expanded && (
         <div className="px-4 pb-4 border-t border-border/40 pt-3 space-y-3 animate-fade-in">
-          {/* Price levels */}
           {signal.entry_price && (
             <div className="grid grid-cols-3 gap-2">
               {[
-                { label: "Entry",  value: signal.entry_price,  color: "text-foreground" },
-                { label: "SL",     value: signal.stop_loss,    color: "text-bear" },
-                { label: "Target", value: signal.target_1,     color: "text-bull" },
+                { label: "Entry",  value: signal.entry_price, color: "text-foreground" },
+                { label: "SL",     value: signal.stop_loss,   color: "text-bear" },
+                { label: "Target", value: signal.target_1,    color: "text-bull" },
               ].map(({ label, value, color }) => (
                 <div key={label} className="bg-muted/40 rounded-xl p-2.5 text-center border border-border/60">
                   <div className="text-[9px] text-muted-foreground uppercase tracking-widest mb-1">{label}</div>
                   <div className={cn("text-xs font-mono font-bold", color)}>
-                    {value ? `₹${fmt(value)}` : "—"}
+                    {value != null ? `₹${fmt(value)}` : "—"}
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Reason */}
           <div className="bg-muted/30 rounded-xl p-3 border border-border/40">
             <p className="text-[10px] text-muted-foreground leading-relaxed">{signal.reason}</p>
           </div>
 
-          {/* Bias warning */}
+          {signal.sentiment_override && signal.original_signal && (
+            <div className="bg-gold/5 border border-gold/20 rounded-xl p-3 flex gap-2">
+              <ShieldAlert size={13} className="text-gold shrink-0 mt-0.5" />
+              <p className="text-[10px] text-gold/80 leading-relaxed">
+                Signal overridden by FinBERT sentiment: original was{" "}
+                <span className="font-bold">{signal.original_signal}</span>
+                {signal.sentiment_score != null && ` (score: ${signal.sentiment_score.toFixed(3)})`}
+              </p>
+            </div>
+          )}
+
           {signal.bias_warning && (
             <div className="bg-gold/5 border border-gold/20 rounded-xl p-3 flex gap-2">
               <ShieldAlert size={13} className="text-gold shrink-0 mt-0.5" />
               <p className="text-[10px] text-gold/80 leading-relaxed">{signal.bias_message}</p>
             </div>
+          )}
+
+          {signal.source_confirmations && (
+            <AuditTrail confirmations={signal.source_confirmations} />
           )}
         </div>
       )}

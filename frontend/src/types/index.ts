@@ -26,7 +26,7 @@ export interface Holding {
   pnl_pct: number | null;
   sector: string | null;
   data_quality: string;
-  uploaded_at: string;
+  uploaded_at: string | null;
 }
 
 // ── Market Regime ─────────────────────────────────────────────────────────────
@@ -34,7 +34,6 @@ export interface Holding {
 export interface RegimeSnapshot {
   id: number;
   timestamp: string;
-  index_symbol: string;
   regime_label: string;
   adx_14: number | null;
   atr_14: number | null;
@@ -47,6 +46,25 @@ export interface RegimeSnapshot {
   price_vs_ema: string | null;
   regime_summary: string | null;
   confidence_score: number | null;
+}
+
+// ── Source Confirmations ──────────────────────────────────────────────────────
+
+export interface SourceConfirmations {
+  technical_signal:    string;
+  tradingview_summary: string;
+  moneycontrol_mood:   string;
+  news_sentiment:      string;
+  sentiment_override:  boolean;
+  macro_available:     boolean;
+  macro_risk_flags:    string[];
+  macro_notes:         string[];
+  dxy:                 number | null;
+  us_10y_yield:        number | null;
+  brent_crude:         number | null;
+  sl_multiplier:       number | null;
+  pos_size_factor:     number | null;
+  bias_warning:        boolean;
 }
 
 // ── Signals ───────────────────────────────────────────────────────────────────
@@ -72,6 +90,11 @@ export interface FinalSignal {
   agreement_bonus: number | null;
   bias_warning: boolean | null;
   bias_message: string | null;
+  sentiment_score: number | null;
+  sentiment_label: string | null;
+  sentiment_override: boolean | null;
+  original_signal: string | null;
+  source_confirmations: SourceConfirmations | null;
   reason: string;
   status: string;
   generated_at: string;
@@ -81,6 +104,7 @@ export interface FinalSignal {
 export interface DashboardPayload {
   regime: string;
   regime_confidence: number;
+  regime_summary: string | null;
   total_buy_signals: number;
   total_sell_signals: number;
   total_hold_signals: number;
@@ -88,6 +112,46 @@ export interface DashboardPayload {
   bias_warning: boolean;
   bias_message: string;
   last_scan_at: string | null;
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export interface Notification {
+  id: number;
+  ticker: string;
+  signal_type: string;
+  confidence: number | null;
+  regime: string | null;
+  channel: string;
+  subject: string | null;
+  delivered: boolean;
+  sent_at: string;
+}
+
+// ── Budget ────────────────────────────────────────────────────────────────────
+
+export interface BudgetStatus {
+  year:            number;
+  month:           number;
+  total_budget:    number;
+  allocated:       number;
+  remaining:       number;
+  utilisation_pct: number;
+  open_trades:     number;
+  closed_trades:   number;
+  realised_pnl:    number;
+}
+
+// ── Inception / Data Quality ──────────────────────────────────────────────────
+
+export interface InceptionInfo {
+  ticker:           string;
+  inception_date:   string | null;
+  years_available:  number;
+  quality:          string;
+  quality_message:  string;
+  is_inception:     boolean;
+  ui_banner:        string | null;
 }
 
 // ── Research ──────────────────────────────────────────────────────────────────
@@ -123,16 +187,17 @@ export interface FullResearch {
   coverage_message: string | null;
   analysed_at: string;
 }
+
 // ── Strategy Performance ──────────────────────────────────────────────────────
 
 export interface StrategyResult {
+  rank?: number;
   stock_ticker: string;
   strategy_name: string;
   sharpe_ratio: number | null;
   cagr: number | null;
   win_rate: number | null;
   max_drawdown: number | null;
-  total_trades: number | null;
   years_of_data: number | null;
   data_quality: string;
 }
@@ -152,11 +217,14 @@ export interface PaperTrade {
   strategy_name: string | null;
   pnl: number | null;
   pnl_pct: number | null;
+  ltp?: number;
+  mtm_pnl?: number;
+  mtm_pct?: number;
   entry_time: string;
   exit_time: string | null;
 }
 
-// ── OHLCV ────────────────────────────────────────────────────────────────────
+// ── OHLCV ─────────────────────────────────────────────────────────────────────
 
 export interface OHLCVBar {
   timestamp: string;

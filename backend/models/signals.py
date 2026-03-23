@@ -1,6 +1,7 @@
 """backend/models/signals.py — Live and final trading signals."""
 
 import enum
+import json
 from datetime import datetime
 from sqlalchemy import Column, Integer, Float, String, DateTime, Boolean, Enum, Text, Index, UniqueConstraint
 from backend.core.database import Base
@@ -73,6 +74,7 @@ class FinalSignal(Base):
     sentiment_label      = Column(String(20), nullable=True)
     sentiment_override   = Column(Boolean, default=False)
     original_signal      = Column(Enum(SignalType), nullable=True)  # before override
+    source_confirmations_json = Column(Text, nullable=True)         # JSON: TradingView, Moneycontrol, macro audit
     reason               = Column(Text, default="")
     status               = Column(Enum(SignalStatus), default=SignalStatus.ACTIVE, index=True)
     generated_at         = Column(DateTime, default=datetime.utcnow, index=True)
@@ -104,6 +106,7 @@ class FinalSignal(Base):
             "original_signal":   self.original_signal.value if self.original_signal else None,
             "bias_warning":      self.bias_warning,
             "reason":            self.reason,
+            "source_confirmations": json.loads(self.source_confirmations_json) if self.source_confirmations_json else None,
             "generated_at":      self.generated_at.isoformat() if self.generated_at else None,
         }
 
