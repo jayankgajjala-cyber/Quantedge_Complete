@@ -7,29 +7,56 @@ export const api = axios.create({
   timeout: 30000,
 });
 
-// Attach JWT to every request
-api.interceptors.request.use((config) => {
-  if (typeof window !== "undefined") {
-    const token = localStorage.getItem("access_token");
-    if (token) config.headers.Authorization = `Bearer ${token}`;
+// ── Token helpers ─────────────────────────────────────────────────────────────
+// Zustand persist stores under key "trading-auth" as JSON: { state: { token, username } }
+// api.ts must read from the same place so JWT is attached to every request.
+
+function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("trading-auth");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.state?.token ?? null;
+  } catch {
+    return null;
   }
+}
+
+function clearStoredToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem("trading-auth");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed?.state) {
+      parsed.state.token    = null;
+      parsed.state.username = null;
+      localStorage.setItem("trading-auth", JSON.stringify(parsed));
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Interceptors ──────────────────────────────────────────────────────────────
+
+api.interceptors.request.use((config) => {
+  const token = getStoredToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-// Redirect to /login on 401
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401 && typeof window !== "undefined") {
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("username");
+      clearStoredToken();
       window.location.href = "/login";
     }
     return Promise.reject(err);
   }
 );
 
-// ── Auth helpers ─────────────────────────────────────────────────────────────
+// ── Auth helpers ──────────────────────────────────────────────────────────────
 
 export async function stepOneLogin(username: string, password: string) {
   const { data } = await api.post("/auth/login", { username, password });
@@ -38,29 +65,21 @@ export async function stepOneLogin(username: string, password: string) {
 
 export async function stepTwoVerifyOTP(username: string, otp: string) {
   const { data } = await api.post("/auth/verify-otp", { username, otp });
-  if (data.access_token) {
-    localStorage.setItem("access_token", data.access_token);
-    localStorage.setItem("username", data.username);
-  }
   return data;
 }
 
 export function logout() {
-  localStorage.removeItem("access_token");
-  localStorage.removeItem("username");
+  clearStoredToken();
   window.location.href = "/login";
 }
 
 export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("access_token");
+  return getStoredToken();
 }
 
 export function isAuthenticated(): boolean {
-  return !!getToken();
+  return !!getStoredToken();
 }
-
-// ── Typed fetch helpers (used by SWR) ───────────────────────────────────────
 
 export const fetcher = (url: string) =>
   api.get(url).then((r) => r.data);

@@ -68,7 +68,7 @@ export default function IntelligenceMarquee() {
   const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
   async function fetchData() {
-    const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+    const token = typeof window !== "undefined" ? JSON.parse(localStorage.getItem("trading-auth") || "{}").state?.token ?? null : null;
     if (!token) return;
     const headers = { Authorization: `Bearer ${token}` };
     try {
