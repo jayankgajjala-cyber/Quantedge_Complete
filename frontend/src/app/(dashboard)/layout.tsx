@@ -9,13 +9,23 @@ import { SWRConfig } from "swr";
 import { fetcher } from "@/lib/api";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const token  = useAuthStore((s) => s.token);
-  const router = useRouter();
+  const token        = useAuthStore((s) => s.token);
+  const hasHydrated  = useAuthStore((s) => s._hasHydrated);
+  const router       = useRouter();
 
   useEffect(() => {
-    if (!token) router.replace("/login");
-  }, [token, router]);
+    // Only redirect AFTER Zustand has finished loading from localStorage.
+    // Without this check, the layout renders before the persisted token
+    // is available and immediately redirects to /login even when logged in.
+    if (hasHydrated && !token) {
+      router.replace("/login");
+    }
+  }, [token, hasHydrated, router]);
 
+  // Show nothing while hydration is in progress — prevents flash redirect
+  if (!hasHydrated) return null;
+
+  // Hydrated but no token — redirect happening, show nothing
   if (!token) return null;
 
   return (
