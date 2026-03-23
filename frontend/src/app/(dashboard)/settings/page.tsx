@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { Settings, Server, Zap, Database, Key, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { runBacktest } from "@/hooks/useData";
 import { useAuthStore } from "@/lib/store";
 import { Card, CardHeader, CardContent, Badge } from "@/components/ui";
@@ -58,7 +58,7 @@ export default function SettingsPage() {
         toast.success("Backtest jobs dispatched for all holdings");
       }
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Backtest failed to start");
+      toast.error(getErrorMessage(err));
     } finally {
       setBacktesting(false);
     }
@@ -77,7 +77,7 @@ export default function SettingsPage() {
         description: data.regime_summary ?? `${data.signals_count ?? 0} signals generated`,
       });
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Detection failed");
+      toast.error(getErrorMessage(err));
     } finally {
       setDetecting(false);
     }
@@ -100,7 +100,7 @@ export default function SettingsPage() {
       );
       toast.success(`Research refreshed for ${tickers.length} holdings`);
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Refresh failed");
+      toast.error(getErrorMessage(err));
     } finally {
       setRefreshing(false);
     }

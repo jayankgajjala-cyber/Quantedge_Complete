@@ -13,7 +13,7 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 
 const NAV = [
-  { href: "/",             label: "Portfolio",      icon: Briefcase,    desc: "Holdings & P&L" },
+  { href: "/portfolio",    label: "Portfolio",      icon: Briefcase,    desc: "Holdings & P&L" },
   { href: "/signals",      label: "Market Signals", icon: Zap,          desc: "Live regime signals" },
   { href: "/research",     label: "News Research",  icon: Newspaper,    desc: "AI sentiment feed" },
   { href: "/paper-trading",label: "Paper Trading",  icon: FlaskConical, desc: "Simulated trades" },
@@ -58,7 +58,7 @@ export default function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 py-4 px-2 space-y-1 overflow-y-auto">
         {NAV.map(({ href, label, icon: Icon, desc }) => {
-          const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+          const active = pathname === href || (href !== "/portfolio" && pathname.startsWith(href));
           return (
             <Link key={href} href={href}
               className={cn(

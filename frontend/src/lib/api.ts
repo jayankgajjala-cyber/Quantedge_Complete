@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -8,8 +8,7 @@ export const api = axios.create({
   timeout: 30_000,
 });
 
-// Long-running operations: backtest fetches 10yr data + runs 8 strategies per ticker.
-// 30s is not enough. Use 120s for these calls only.
+// Long-running operations (backtest = 10yr data fetch + 8 strategies)
 export const apiSlow = axios.create({
   baseURL: `${API_URL}/api`,
   timeout: 120_000,
@@ -51,8 +50,8 @@ function attachAuth(config: any) {
 api.interceptors.request.use(attachAuth);
 apiSlow.interceptors.request.use(attachAuth);
 
-// 401 on either client → clear token and redirect to login
-function on401(err: any) {
+// 401 → clear token and redirect to login
+function on401(err: AxiosError) {
   if (err.response?.status === 401 && typeof window !== "undefined") {
     clearStoredToken();
     window.location.href = "/login";
@@ -61,6 +60,24 @@ function on401(err: any) {
 }
 api.interceptors.response.use((r) => r, on401);
 apiSlow.interceptors.response.use((r) => r, on401);
+
+// ── Human-readable error extraction ──────────────────────────────────────────
+// Call this in every catch block instead of err.response?.data?.detail
+// It returns a useful message even for network/CORS failures where response is undefined.
+export function getErrorMessage(err: any): string {
+  if (!err) return "Unknown error";
+  // Server responded with an error body
+  if (err.response?.data?.detail) return String(err.response.data.detail);
+  if (err.response?.data?.message) return String(err.response.data.message);
+  // Network error (no response) = CORS blocked, backend unreachable, timeout
+  if (err.code === "ECONNABORTED") return "Request timed out — backend may be overloaded";
+  if (!err.response) {
+    return `Cannot reach backend at ${API_URL}. Check that NEXT_PUBLIC_API_URL is set correctly and the backend is running.`;
+  }
+  if (err.response.status === 422) return "Invalid request format — check your input";
+  if (err.response.status === 500) return "Backend error — check server logs";
+  return err.message || "Request failed";
+}
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 export async function stepOneLogin(username: string, password: string) {

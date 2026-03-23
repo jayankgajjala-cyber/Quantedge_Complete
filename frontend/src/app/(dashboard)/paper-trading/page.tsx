@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { FlaskConical, Plus, TrendingUp, TrendingDown, DollarSign, Loader2, Wallet, PieChart, Target } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { usePaperTrades, useBudget } from "@/hooks/useData";
 import { cn, fmt, fmtPct, fmtCurrency, fmtDate } from "@/lib/utils";
 import { Card, CardHeader, CardContent, StatCard, Skeleton, Empty, Badge, Tabs } from "@/components/ui";
@@ -47,7 +47,7 @@ export default function PaperTradingPage() {
       setShowForm(false);
       setForm({ symbol: "", direction: "BUY", quantity: "", entry_price: "", stop_loss: "", target: "", strategy_name: "" });
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Failed to open trade");
+      toast.error(getErrorMessage(err));
     } finally { setSubmitting(false); }
   }
 
@@ -62,7 +62,7 @@ export default function PaperTradingPage() {
       setClosing(null);
       setExitPrice("");
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Failed to close trade");
+      toast.error(getErrorMessage(err));
     } finally { setClosing(null); }
   }
 

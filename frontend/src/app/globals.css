@@ -40,23 +40,68 @@
 
 @layer utilities {
   .font-display { font-family: var(--font-syne), sans-serif; }
+
   .glass {
     background: rgba(255,255,255,0.03);
     backdrop-filter: blur(20px);
     border: 1px solid rgba(255,255,255,0.07);
   }
+
+  /* ── Glow effects ───────────────────────────────────────────────────────── */
   .glow-bull { box-shadow: 0 0 30px -8px rgba(0,196,125,0.4); }
   .glow-bear { box-shadow: 0 0 30px -8px rgba(255,71,87,0.4); }
   .glow-gold { box-shadow: 0 0 30px -8px rgba(240,180,41,0.4); }
-  .text-bull { color: #00c47d; }
-  .text-bear { color: #ff4757; }
-  .text-gold { color: #f0b429; }
-  .bg-bull\/10 { background-color: rgba(0,196,125,0.1); }
-  .bg-bear\/10 { background-color: rgba(255,71,87,0.1); }
-  .bg-gold\/10 { background-color: rgba(240,180,41,0.1); }
-  .border-bull\/20 { border-color: rgba(0,196,125,0.2); }
-  .border-bear\/20 { border-color: rgba(255,71,87,0.2); }
-  .border-gold\/20 { border-color: rgba(240,180,41,0.2); }
+
+  /* ── Semantic colours ───────────────────────────────────────────────────── */
+  .text-bull  { color: #00c47d; }
+  .text-bear  { color: #ff4757; }
+  .text-gold  { color: #f0b429; }
+  .text-cyan  { color: #00d4ff; }
+  .bg-bull    { background-color: #00c47d; }
+  .bg-bear    { background-color: #ff4757; }
+  .bg-gold    { background-color: #f0b429; }
+  .bg-cyan    { background-color: #00d4ff; }
+
+  /* ── Opacity variants — background ─────────────────────────────────────── */
+  .bg-bull\/5   { background-color: rgba(0,196,125,0.05); }
+  .bg-bull\/10  { background-color: rgba(0,196,125,0.10); }
+  .bg-bull\/15  { background-color: rgba(0,196,125,0.15); }
+  .bg-bull\/20  { background-color: rgba(0,196,125,0.20); }
+  .bg-bear\/5   { background-color: rgba(255,71,87,0.05); }
+  .bg-bear\/10  { background-color: rgba(255,71,87,0.10); }
+  .bg-bear\/15  { background-color: rgba(255,71,87,0.15); }
+  .bg-bear\/20  { background-color: rgba(255,71,87,0.20); }
+  .bg-gold\/5   { background-color: rgba(240,180,41,0.05); }
+  .bg-gold\/10  { background-color: rgba(240,180,41,0.10); }
+  .bg-gold\/15  { background-color: rgba(240,180,41,0.15); }
+  .bg-gold\/20  { background-color: rgba(240,180,41,0.20); }
+  .bg-cyan\/10  { background-color: rgba(0,212,255,0.10); }
+  .bg-cyan\/15  { background-color: rgba(0,212,255,0.15); }
+
+  /* ── Opacity variants — border ──────────────────────────────────────────── */
+  .border-bull\/20 { border-color: rgba(0,196,125,0.20); }
+  .border-bull\/25 { border-color: rgba(0,196,125,0.25); }
+  .border-bull\/30 { border-color: rgba(0,196,125,0.30); }
+  .border-bull\/40 { border-color: rgba(0,196,125,0.40); }
+  .border-bear\/20 { border-color: rgba(255,71,87,0.20); }
+  .border-bear\/25 { border-color: rgba(255,71,87,0.25); }
+  .border-bear\/30 { border-color: rgba(255,71,87,0.30); }
+  .border-gold\/20 { border-color: rgba(240,180,41,0.20); }
+  .border-gold\/25 { border-color: rgba(240,180,41,0.25); }
+  .border-gold\/30 { border-color: rgba(240,180,41,0.30); }
+  .border-cyan\/20 { border-color: rgba(0,212,255,0.20); }
+
+  /* ── Opacity variants — text ────────────────────────────────────────────── */
+  .text-bull\/80 { color: rgba(0,196,125,0.80); }
+  .text-bear\/80 { color: rgba(255,71,87,0.80); }
+  .text-gold\/80 { color: rgba(240,180,41,0.80); }
+  .text-gold\/70 { color: rgba(240,180,41,0.70); }
+
+  /* ── Gradient helpers ───────────────────────────────────────────────────── */
+  .to-accent\/5   { --tw-gradient-to: rgba(0,212,255,0.05) var(--tw-gradient-to-position); }
+  .bg-accent\/5   { background-color: rgba(0,212,255,0.05); }
+
+  /* ── Scanline overlay (login page bg) ───────────────────────────────────── */
   .scanline {
     background: repeating-linear-gradient(
       0deg, transparent, transparent 2px,

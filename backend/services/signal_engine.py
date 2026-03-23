@@ -239,11 +239,17 @@ def _persist_final(db, scan_id, ticker, d, regime_mode):
     fs.sentiment_override   = d.get("sentiment_override", False)
     fs.original_signal      = orig_enum
     fs.reason               = d.get("reason", "")
-    # Persist source_confirmations as JSON text so the API can return it
+    # Persist source_confirmations as JSON text so the API can return it.
+    # Wrapped in try/except: if the column doesn't exist yet in an older DB
+    # (SQLite with checkfirst=True won't add new columns), the signal is still
+    # saved — just without the audit trail. Doesn't crash the scan.
     confirmations = d.get("source_confirmations")
     if confirmations:
-        import json as _json
-        fs.source_confirmations_json = _json.dumps(confirmations)
+        try:
+            import json as _json
+            fs.source_confirmations_json = _json.dumps(confirmations)
+        except Exception:
+            pass  # Column may not exist in older DB — non-fatal
     fs.status               = SignalStatus.ACTIVE
     fs.generated_at         = datetime.utcnow()
     fs.expires_at           = datetime.utcnow() + timedelta(minutes=SIGNAL_TTL_MINUTES)

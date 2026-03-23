@@ -5,7 +5,7 @@ import {
   RefreshCw, AlertCircle, BarChart3, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { useHoldings } from "@/hooks/useData";
 import { cn, fmt, fmtPct, fmtCurrency } from "@/lib/utils";
 import { Card, CardHeader, CardContent, StatCard, Skeleton, Empty, Badge } from "@/components/ui";
@@ -41,7 +41,7 @@ export default function PortfolioPage() {
       });
       mutate();
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Upload failed — check CSV format");
+      toast.error(getErrorMessage(err));
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";

@@ -29,7 +29,7 @@ export default function LoginPage() {
       setStep("otp");
       toast.success("OTP sent!", { description: `Check ${res.email_hint}` });
     } catch (err: any) {
-      const detail = err.response?.data?.detail || "Login failed";
+      const detail = getErrorMessage(err);
       toast.error(detail);
     } finally {
       setLoading(false);
@@ -45,7 +45,7 @@ export default function LoginPage() {
       toast.success("Welcome back, " + res.username);
       router.replace("/");
     } catch (err: any) {
-      const detail = err.response?.data?.detail || "Invalid OTP";
+      const detail = getErrorMessage(err);
       toast.error(detail);
     } finally {
       setLoading(false);

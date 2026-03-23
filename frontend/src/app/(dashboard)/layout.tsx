@@ -8,25 +8,40 @@ import Header from "@/components/layout/Header";
 import { SWRConfig } from "swr";
 import { fetcher } from "@/lib/api";
 
+function LoadingSkeleton() {
+  return (
+    <div className="flex h-screen overflow-hidden bg-background">
+      <div className="w-[220px] border-r border-border bg-card shrink-0" />
+      <div className="flex-1 flex flex-col">
+        <div className="h-14 border-b border-border bg-card/80" />
+        <div className="h-7 border-b border-border bg-card/60" />
+        <div className="flex-1 p-5 space-y-4">
+          <div className="h-6 w-48 rounded-lg bg-muted/60 animate-pulse" />
+          <div className="grid grid-cols-4 gap-3">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="h-20 rounded-2xl bg-muted/40 animate-pulse" />
+            ))}
+          </div>
+          <div className="h-64 rounded-2xl bg-muted/40 animate-pulse" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const token        = useAuthStore((s) => s.token);
-  const hasHydrated  = useAuthStore((s) => s._hasHydrated);
-  const router       = useRouter();
+  const token       = useAuthStore((s) => s.token);
+  const hasHydrated = useAuthStore((s) => s._hasHydrated);
+  const router      = useRouter();
 
   useEffect(() => {
-    // Only redirect AFTER Zustand has finished loading from localStorage.
-    // Without this check, the layout renders before the persisted token
-    // is available and immediately redirects to /login even when logged in.
     if (hasHydrated && !token) {
       router.replace("/login");
     }
   }, [token, hasHydrated, router]);
 
-  // Show nothing while hydration is in progress — prevents flash redirect
-  if (!hasHydrated) return null;
-
-  // Hydrated but no token — redirect happening, show nothing
-  if (!token) return null;
+  if (!hasHydrated) return <LoadingSkeleton />;
+  if (!token) return <LoadingSkeleton />;
 
   return (
     <SWRConfig value={{ fetcher, revalidateOnFocus: true }}>

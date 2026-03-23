@@ -350,12 +350,12 @@ app = FastAPI(
     redoc_url = "/redoc",
 )
 
-# FIX 5: CORS — explicit origin list from FRONTEND_URL, not wildcard
-# Read from CORS_ORIGINS first, fall back to FRONTEND_URL
-_raw_origins = os.environ.get(
-    "CORS_ORIGINS",
-    cfg.FRONTEND_URL
-)
+# CORS: defaults to "*" (allow all) so the app works immediately after deployment
+# without needing to configure CORS_ORIGINS.
+# To restrict in production, set CORS_ORIGINS env var to your exact frontend URL:
+#   e.g. CORS_ORIGINS=https://quantedge.vercel.app
+# Multiple origins: CORS_ORIGINS=https://app1.vercel.app,https://app2.vercel.app
+_raw_origins = os.environ.get("CORS_ORIGINS", "*")
 _cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 _allow_all    = "*" in _cors_origins
 
