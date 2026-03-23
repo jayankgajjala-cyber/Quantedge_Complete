@@ -3,7 +3,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  BarChart3, Briefcase, FlaskConical, Newspaper,
+  BarChart3, Briefcase, FlaskConical, Newspaper, Activity,
   Settings, ChevronLeft, ChevronRight, LogOut,
   TrendingUp, Zap, Trophy,
 } from "lucide-react";
@@ -19,6 +19,7 @@ const NAV = [
   { href: "/paper-trading",label: "Paper Trading",  icon: FlaskConical, desc: "Simulated trades" },
   { href: "/leaderboard",  label: "Leaderboard",    icon: Trophy,       desc: "Strategy rankings" },
   { href: "/settings",     label: "Settings",       icon: Settings,     desc: "Configuration" },
+  { href: "/debug",       label: "Diagnostics",    icon: Activity,     desc: "Check system health" },
 ];
 
 export default function Sidebar() {

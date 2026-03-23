@@ -4,10 +4,15 @@ import { useSearchParams, useRouter } from "next/navigation";
 import {
   Newspaper, Search, AlertTriangle, TrendingUp, TrendingDown,
   Minus, Sparkles, BarChart3, RefreshCw, ExternalLink, Clock,
+  Loader2, WifiOff,
 } from "lucide-react";
 import { useResearch, useNews, useInception } from "@/hooks/useData";
-import { cn, sentimentColor, timeAgo, fmtDate, regimeBadge } from "@/lib/utils";
-import { Card, CardHeader, CardContent, Badge, Skeleton, Empty } from "@/components/ui";
+import { getErrorMessage } from "@/lib/api";
+import { cn, sentimentColor, timeAgo, regimeBadge } from "@/lib/utils";
+import {
+  Card, CardHeader, CardContent, Badge, Skeleton, Empty,
+  ErrorBanner, LoadingOverlay,
+} from "@/components/ui";
 import CandlestickChart from "@/components/charts/CandlestickChart";
 import InceptionBanner from "@/components/signals/InceptionBanner";
 import type { NewsArticle } from "@/types";
@@ -25,32 +30,44 @@ function SentimentDot({ score }: { score: number | null }) {
 
 function ScoreBar({ score }: { score: number | null }) {
   if (score == null) return null;
-  const pct = ((score + 1) / 2) * 100;
+  const pct   = ((score + 1) / 2) * 100;
   const color = score > 0.3 ? "bg-bull" : score < -0.3 ? "bg-bear" : "bg-gold";
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[9px] text-muted-foreground font-mono w-10 text-right">{score.toFixed(3)}</span>
+      <span className="text-[9px] text-muted-foreground font-mono w-10 text-right">
+        {score.toFixed(3)}
+      </span>
       <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden relative">
         <div className="absolute left-1/2 top-0 bottom-0 w-px bg-border" />
-        <div className={cn("absolute top-0 h-full rounded-full", color)}
-          style={{ left: score >= 0 ? "50%" : `${pct}%`, width: `${Math.abs(score) * 50}%` }} />
+        <div
+          className={cn("absolute top-0 h-full rounded-full", color)}
+          style={{ left: score >= 0 ? "50%" : `${pct}%`, width: `${Math.abs(score) * 50}%` }}
+        />
       </div>
     </div>
   );
 }
 
 export default function ResearchPage() {
-  const router        = useRouter();
-  const params        = useSearchParams();
+  const router  = useRouter();
+  const params  = useSearchParams();
   const [ticker, setTicker] = useState<string>(params.get("ticker") || "RELIANCE");
-  const [input, setInput]   = useState(ticker);
+  const [input,  setInput]  = useState(ticker);
 
-  const { data: research, isLoading: resLoading, mutate: mutateRes } = useResearch(ticker);
-  // KEY FIX: pass research?.ticker (not just !!research) as the gate.
-  // When ticker changes, `research` still holds the previous ticker's object for one
-  // render cycle (truthy but wrong ticker). Comparing research.ticker === ticker ensures
-  // we only fetch articles after NewsService.analyse() has actually run for THIS ticker.
-  const { data: news, isLoading: newsLoading } = useNews(ticker, research?.ticker);
+  const {
+    data: research,
+    isLoading: resLoading,
+    error: resError,
+    mutate: mutateRes,
+  } = useResearch(ticker);
+
+  // Only fetch articles after research for THIS ticker has loaded (prevents race condition)
+  const {
+    data: news,
+    isLoading: newsLoading,
+    error: newsError,
+  } = useNews(ticker, research?.ticker);
+
   const { data: inception } = useInception(ticker);
 
   function handleSearch(e: React.FormEvent) {
@@ -71,7 +88,9 @@ export default function ResearchPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="font-display font-bold text-xl">News Research</h1>
-          <p className="text-muted-foreground text-xs mt-0.5">AI-powered sentiment · FinBERT + BART · 60-min cache</p>
+          <p className="text-muted-foreground text-xs mt-0.5">
+            AI-powered sentiment · FinBERT + BART · 60-min cache
+          </p>
         </div>
         <form onSubmit={handleSearch} className="flex gap-2">
           <div className="relative">
@@ -83,8 +102,10 @@ export default function ResearchPage() {
               className="bg-muted/50 border border-border rounded-xl pl-8 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/30 transition-all w-36"
             />
           </div>
-          <button type="submit"
-            className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/20 transition-all">
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/20 transition-all"
+          >
             Analyse
           </button>
         </form>
@@ -93,21 +114,33 @@ export default function ResearchPage() {
       {/* Quick ticker pills */}
       <div className="flex gap-2 flex-wrap">
         {NIFTY_50.map((t) => (
-          <button key={t}
+          <button
+            key={t}
             onClick={() => { setTicker(t); setInput(t); router.push(`/research?ticker=${t}`, { scroll: false }); }}
             className={cn(
               "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all",
               ticker === t
                 ? "bg-primary/15 border-primary/40 text-primary"
-                : "border-border text-muted-foreground hover:text-foreground hover:border-border/80 bg-muted/30"
-            )}>
+                : "border-border text-muted-foreground hover:text-foreground bg-muted/30"
+            )}
+          >
             {t}
           </button>
         ))}
       </div>
 
-      {/* Inception / data quality banner — shown when < 10 years of data */}
-      {inception && inception.is_inception && (
+      {/* Research error */}
+      {resError && !resLoading && (
+        <ErrorBanner
+          title={`❌ Failed to load research for ${ticker}`}
+          message={getErrorMessage(resError)}
+          onRetry={() => mutateRes()}
+          onDismiss={() => {}}
+        />
+      )}
+
+      {/* Inception / data quality banner */}
+      {inception?.is_inception && (
         <InceptionBanner
           quality={inception.quality}
           qualityMessage={inception.quality_message}
@@ -136,10 +169,10 @@ export default function ResearchPage() {
       )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-5">
-        {/* Left: Insight + News feed */}
+        {/* Left: AI insight + news feed */}
         <div className="space-y-4">
 
-          {/* Executive Insight Box */}
+          {/* Executive insight */}
           <div className="bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 rounded-2xl p-5">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-6 h-6 rounded-lg bg-primary/20 flex items-center justify-center">
@@ -149,20 +182,34 @@ export default function ResearchPage() {
                 AI Executive Insight — {ticker}
               </span>
               {research && (
-                <button onClick={() => mutateRes()}
-                  className="ml-auto text-muted-foreground hover:text-foreground transition-colors">
+                <button
+                  onClick={() => mutateRes()}
+                  className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
+                >
                   <RefreshCw size={11} />
                 </button>
               )}
             </div>
 
             {resLoading ? (
-              <div className="space-y-2">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-5 w-full" />)}</div>
+              <LoadingOverlay
+                message={`Analysing ${ticker} with FinBERT + BART…`}
+                eta="~20–40 seconds"
+                subMessage="First load runs AI inference. Subsequent loads use 60-min cache."
+              />
+            ) : resError ? (
+              <div className="flex items-center gap-2 py-6 justify-center">
+                <WifiOff size={16} className="text-muted-foreground/40" />
+                <p className="text-xs text-muted-foreground">Analysis unavailable — backend error</p>
+              </div>
             ) : research?.executive_summary?.length ? (
               <ul className="space-y-3">
                 {research.executive_summary.map((bullet, i) => (
-                  <li key={i} className="flex gap-3 text-sm leading-relaxed animate-fade-in"
-                    style={{ animationDelay: `${i * 80}ms` }}>
+                  <li
+                    key={i}
+                    className="flex gap-3 text-sm leading-relaxed animate-fade-in"
+                    style={{ animationDelay: `${i * 80}ms` }}
+                  >
                     <span className="text-primary font-bold shrink-0 mt-0.5">
                       {["①","②","③"][i] ?? "•"}
                     </span>
@@ -171,13 +218,14 @@ export default function ResearchPage() {
                 ))}
               </ul>
             ) : (
-              <p className="text-xs text-muted-foreground">Generating AI summary…</p>
+              <p className="text-xs text-muted-foreground py-4 text-center">
+                No analysis available — click Analyse to generate
+              </p>
             )}
 
-            {/* Forecast outlook */}
             {research?.forecast_outlook && (
               <div className="mt-4 pt-4 border-t border-primary/20">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 mb-1.5">
                   <span className="text-[9px] uppercase tracking-widest text-muted-foreground">12–24 Month Outlook</span>
                   <span className={cn("text-[9px] font-bold px-2 py-0.5 rounded-full border",
                     research.forecast_direction === "BULLISH" ? "text-bull bg-bull/10 border-bull/20"
@@ -187,30 +235,51 @@ export default function ResearchPage() {
                     {research.forecast_direction}
                   </span>
                 </div>
-                <p className="text-xs text-foreground/80 mt-1.5">{research.forecast_outlook}</p>
+                <p className="text-xs text-foreground/80">{research.forecast_outlook}</p>
               </div>
             )}
           </div>
 
-          {/* News feed — latest-first */}
+          {/* News feed */}
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Newspaper size={13} className="text-muted-foreground" />
               <span className="text-sm font-semibold">Latest News</span>
               <Badge variant="neutral" size="sm">{news?.length ?? 0} articles</Badge>
-              <span className="ml-auto text-[9px] text-muted-foreground">Latest first ↑</span>
+              {newsLoading && <Loader2 size={11} className="animate-spin text-muted-foreground ml-1" />}
+              <span className="ml-auto text-[9px] text-muted-foreground">Latest first</span>
             </div>
 
+            {/* News error */}
+            {newsError && !newsLoading && (
+              <ErrorBanner
+                title="❌ Failed to fetch news articles"
+                message={getErrorMessage(newsError)}
+              />
+            )}
+
             {newsLoading ? (
-              <div className="space-y-2">{[...Array(6)].map((_, i) => <Skeleton key={i} className="h-20 rounded-xl" />)}</div>
-            ) : !news?.length ? (
-              <Empty icon={<Newspaper size={28} />} title="No articles found" description="Analysis will run automatically on first search" />
+              <LoadingOverlay
+                message="Fetching latest financial news…"
+                eta="~5–10 seconds"
+                subMessage="Scraping news sources and running FinBERT sentiment analysis"
+              />
+            ) : !news?.length && !newsLoading ? (
+              <Empty
+                icon={<Newspaper size={28} />}
+                title="No articles found"
+                description={resError
+                  ? "Analysis failed — check backend connection"
+                  : "Analysis runs automatically when you search a ticker"}
+              />
             ) : (
               <div className="space-y-2">
-                {news.map((article: NewsArticle, i: number) => (
-                  <div key={i}
+                {(news ?? []).map((article: NewsArticle, i: number) => (
+                  <div
+                    key={i}
                     className="bg-card border border-border rounded-xl p-3.5 hover:border-primary/20 transition-all animate-fade-in group"
-                    style={{ animationDelay: `${i * 30}ms` }}>
+                    style={{ animationDelay: `${i * 25}ms` }}
+                  >
                     <div className="flex items-start gap-3">
                       <SentimentDot score={article.sentiment_score} />
                       <div className="flex-1 min-w-0">
@@ -219,21 +288,31 @@ export default function ResearchPage() {
                             {article.title}
                           </p>
                           {article.url && (
-                            <a href={article.url} target="_blank" rel="noopener noreferrer"
-                              className="shrink-0 text-muted-foreground hover:text-primary transition-colors mt-0.5">
+                            <a
+                              href={article.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="shrink-0 text-muted-foreground hover:text-primary transition-colors mt-0.5"
+                            >
                               <ExternalLink size={10} />
                             </a>
                           )}
                         </div>
                         {article.description && (
-                          <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">{article.description}</p>
+                          <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
+                            {article.description}
+                          </p>
                         )}
                         <div className="flex items-center gap-3 mt-2">
-                          <span className={cn("text-[9px] font-semibold uppercase",
+                          <span className={cn(
+                            "text-[9px] font-semibold uppercase",
                             article.source_name === "NEWSAPI" ? "text-cyan" : "text-muted-foreground"
-                          )}>{article.source_name.replace("_", " ")}</span>
+                          )}>
+                            {article.source_name.replace("_", " ")}
+                          </span>
                           <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-                            <Clock size={8} />{timeAgo(article.published_at)}
+                            <Clock size={8} />
+                            {timeAgo(article.published_at)}
                           </span>
                           {article.sentiment_score != null && (
                             <div className="ml-auto w-24">
@@ -250,9 +329,8 @@ export default function ResearchPage() {
           </div>
         </div>
 
-        {/* Right: Sentiment panel + chart */}
+        {/* Right: Sentiment + chart + forecast */}
         <div className="space-y-4">
-          {/* Sentiment summary */}
           <Card>
             <CardHeader>
               <span className="text-xs font-semibold flex items-center gap-1.5">
@@ -262,18 +340,19 @@ export default function ResearchPage() {
             </CardHeader>
             <CardContent>
               {resLoading ? (
-                <div className="space-y-3">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-6 w-full" />)}</div>
+                <div className="space-y-3">
+                  {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-6 w-full" />)}
+                </div>
+              ) : resError ? (
+                <p className="text-xs text-muted-foreground text-center py-6">Unavailable</p>
               ) : research ? (
                 <div className="space-y-4">
-                  {/* Big score */}
                   <div className="text-center py-2">
                     <div className={cn("text-4xl font-display font-bold", sentimentColor(sentScore))}>
                       {sentScore >= 0 ? "+" : ""}{sentScore.toFixed(3)}
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">{sentLabel} Sentiment</div>
                   </div>
-
-                  {/* Vote bars */}
                   {[
                     { label: "Positive", count: research.positive_count, color: "bg-bull", total: research.articles_analysed },
                     { label: "Neutral",  count: research.neutral_count,  color: "bg-gold", total: research.articles_analysed },
@@ -285,12 +364,13 @@ export default function ResearchPage() {
                         <span className="font-mono font-semibold">{count}/{total}</span>
                       </div>
                       <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div className={cn("h-full rounded-full transition-all", color)}
-                          style={{ width: total > 0 ? `${(count / total) * 100}%` : "0%" }} />
+                        <div
+                          className={cn("h-full rounded-full transition-all", color)}
+                          style={{ width: total > 0 ? `${(count / total) * 100}%` : "0%" }}
+                        />
                       </div>
                     </div>
                   ))}
-
                   <div className="pt-2 border-t border-border space-y-2 text-xs">
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Articles analysed</span>
@@ -300,7 +380,8 @@ export default function ResearchPage() {
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Divergence (σ)</span>
                         <span className={cn("font-mono font-semibold",
-                          research.sentiment_std_dev > 0.8 ? "text-bear" : "text-foreground")}>
+                          research.sentiment_std_dev > 0.8 ? "text-bear" : "text-foreground"
+                        )}>
                           {research.sentiment_std_dev.toFixed(3)}
                         </span>
                       </div>
@@ -311,7 +392,6 @@ export default function ResearchPage() {
             </CardContent>
           </Card>
 
-          {/* Mini chart */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <BarChart3 size={12} className="text-muted-foreground" />
@@ -320,18 +400,17 @@ export default function ResearchPage() {
             <CandlestickChart ticker={ticker} showEMA showBB={false} showVolume={false} height={260} />
           </div>
 
-          {/* Forecast card */}
           {research?.forecast_direction && (
             <Card>
               <CardContent>
                 <div className="text-[9px] uppercase tracking-widest text-muted-foreground mb-2">Quantitative Forecast</div>
                 <div className="space-y-2.5 text-xs">
                   {[
-                    { label: "Direction",     value: research.forecast_direction,
+                    { label: "Direction", value: research.forecast_direction,
                       className: research.forecast_direction === "BULLISH" ? "text-bull" : research.forecast_direction === "BEARISH" ? "text-bear" : "text-gold" },
-                    { label: "Price Slope",   value: research.price_slope_annual ? `${research.price_slope_annual.toFixed(1)}%/yr` : "—", className: "" },
-                    { label: "Revenue CAGR",  value: research.revenue_cagr ? `${research.revenue_cagr.toFixed(1)}%` : "—", className: "" },
-                    { label: "Confidence",    value: research.forecast_confidence ? `${(research.forecast_confidence * 100).toFixed(0)}%` : "—", className: "" },
+                    { label: "Price Slope", value: research.price_slope_annual ? `${research.price_slope_annual.toFixed(1)}%/yr` : "—", className: "" },
+                    { label: "Revenue CAGR", value: research.revenue_cagr ? `${research.revenue_cagr.toFixed(1)}%` : "—", className: "" },
+                    { label: "Confidence", value: research.forecast_confidence ? `${(research.forecast_confidence * 100).toFixed(0)}%` : "—", className: "" },
                   ].map(({ label, value, className }) => (
                     <div key={label} className="flex justify-between">
                       <span className="text-muted-foreground">{label}</span>

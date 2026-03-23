@@ -1,16 +1,26 @@
+/**
+ * api.ts — Axios clients + error utilities
+ *
+ * Two clients:
+ *   api      – 30s timeout   (reads, mutations, uploads)
+ *   apiSlow  – 120s timeout  (backtest, full-portfolio scans)
+ *
+ * Both clients:
+ *   - attach JWT from localStorage on every request
+ *   - redirect to /login on 401
+ *   - never silently swallow errors
+ */
 import axios, { AxiosError } from "axios";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// Default client — 30s timeout for normal reads/mutations
 export const api = axios.create({
-  baseURL: `${API_URL}/api`,
+  baseURL: `${API_BASE}/api`,
   timeout: 30_000,
 });
 
-// Long-running operations (backtest = 10yr data fetch + 8 strategies)
 export const apiSlow = axios.create({
-  baseURL: `${API_URL}/api`,
+  baseURL: `${API_BASE}/api`,
   timeout: 120_000,
 });
 
@@ -40,17 +50,13 @@ function clearStoredToken(): void {
   } catch { /* ignore */ }
 }
 
-// ── Attach JWT to both clients ────────────────────────────────────────────────
+// ── Interceptors ──────────────────────────────────────────────────────────────
 function attachAuth(config: any) {
   const token = getStoredToken();
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 }
 
-api.interceptors.request.use(attachAuth);
-apiSlow.interceptors.request.use(attachAuth);
-
-// 401 → clear token and redirect to login
 function on401(err: AxiosError) {
   if (err.response?.status === 401 && typeof window !== "undefined") {
     clearStoredToken();
@@ -58,25 +64,58 @@ function on401(err: AxiosError) {
   }
   return Promise.reject(err);
 }
+
+api.interceptors.request.use(attachAuth);
+apiSlow.interceptors.request.use(attachAuth);
 api.interceptors.response.use((r) => r, on401);
 apiSlow.interceptors.response.use((r) => r, on401);
 
-// ── Human-readable error extraction ──────────────────────────────────────────
-// Call this in every catch block instead of err.response?.data?.detail
-// It returns a useful message even for network/CORS failures where response is undefined.
+// ── Error extraction ──────────────────────────────────────────────────────────
+/**
+ * Returns a human-readable error string from any axios error.
+ * Works for network errors (CORS, backend down), 4xx, 5xx, and validation.
+ */
 export function getErrorMessage(err: any): string {
   if (!err) return "Unknown error";
-  // Server responded with an error body
-  if (err.response?.data?.detail) return String(err.response.data.detail);
-  if (err.response?.data?.message) return String(err.response.data.message);
-  // Network error (no response) = CORS blocked, backend unreachable, timeout
-  if (err.code === "ECONNABORTED") return "Request timed out — backend may be overloaded";
-  if (!err.response) {
-    return `Cannot reach backend at ${API_URL}. Check that NEXT_PUBLIC_API_URL is set correctly and the backend is running.`;
+
+  // FastAPI HTTPException → detail field
+  if (err.response?.data?.detail) {
+    const d = err.response.data.detail;
+    if (typeof d === "string") return d;
+    if (Array.isArray(d)) return d.map((e: any) => e.msg ?? String(e)).join("; ");
+    return String(d);
   }
-  if (err.response.status === 422) return "Invalid request format — check your input";
-  if (err.response.status === 500) return "Backend error — check server logs";
-  return err.message || "Request failed";
+
+  // Structured backend error
+  if (err.response?.data?.message) return String(err.response.data.message);
+
+  // Timeout
+  if (err.code === "ECONNABORTED") {
+    return "Request timed out — the backend is taking too long. Try again or check backend health.";
+  }
+
+  // Network error (CORS blocked, backend unreachable, no internet)
+  if (!err.response) {
+    return (
+      `Cannot reach backend (${API_BASE}). ` +
+      "Check: (1) NEXT_PUBLIC_API_URL env var on Vercel, " +
+      "(2) CORS_ORIGINS=* on Railway backend, " +
+      "(3) backend service is running."
+    );
+  }
+
+  // HTTP status codes
+  switch (err.response.status) {
+    case 400: return `Bad request: ${err.response.data?.detail ?? "check your input"}`;
+    case 403: return "Access denied";
+    case 404: return "Not found — the resource does not exist";
+    case 422: return "Validation error — check your input data";
+    case 429: return "Too many requests — please wait a moment";
+    case 500: return "Internal server error — check Railway logs";
+    case 502: return "Backend unreachable — Railway service may be starting up";
+    case 503: return "Service unavailable — backend is overloaded";
+    default:  return err.message || `HTTP ${err.response.status} error`;
+  }
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -95,13 +134,7 @@ export function logout() {
   window.location.href = "/login";
 }
 
-export function getToken(): string | null {
-  return getStoredToken();
-}
+export function getToken(): string | null { return getStoredToken(); }
+export function isAuthenticated(): boolean { return !!getStoredToken(); }
 
-export function isAuthenticated(): boolean {
-  return !!getStoredToken();
-}
-
-export const fetcher = (url: string) =>
-  api.get(url).then((r) => r.data);
+export const fetcher = (url: string) => api.get(url).then((r) => r.data);

@@ -188,7 +188,8 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
-    regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
+    try:
+     regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
     subq = (
         db.query(
@@ -359,7 +360,7 @@ def scan_now(db: Session = Depends(get_db)):
         }
     except Exception as exc:
         logger.error("on-demand scan failed: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Scan failed: {exc}")
+        raise HTTPException(500, f"Scan failed: {exc}. Check Railway backend logs for details.")
 
 
 @router.get("/research/{ticker}", response_model=ResearchOut,

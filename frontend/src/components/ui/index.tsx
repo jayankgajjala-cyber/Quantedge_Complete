@@ -11,11 +11,19 @@ export function Card({ className, children, ...props }: React.HTMLAttributes<HTM
 }
 
 export function CardHeader({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("px-5 pt-4 pb-3 border-b border-border/60", className)} {...props}>{children}</div>;
+  return (
+    <div className={cn("px-5 pt-4 pb-3 border-b border-border/60", className)} {...props}>
+      {children}
+    </div>
+  );
 }
 
 export function CardContent({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("px-5 py-4", className)} {...props}>{children}</div>;
+  return (
+    <div className={cn("px-5 py-4", className)} {...props}>
+      {children}
+    </div>
+  );
 }
 
 // ── Badge ─────────────────────────────────────────────────────────────────────
@@ -23,7 +31,13 @@ interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   variant?: "bull" | "bear" | "gold" | "neutral" | "cyan";
   size?: "sm" | "md";
 }
-export function Badge({ className, variant = "neutral", size = "sm", children, ...props }: BadgeProps) {
+export function Badge({
+  className,
+  variant = "neutral",
+  size = "sm",
+  children,
+  ...props
+}: BadgeProps) {
   const variants = {
     bull:    "bg-bull/10 text-bull border-bull/20",
     bear:    "bg-bear/10 text-bear border-bear/20",
@@ -33,8 +47,15 @@ export function Badge({ className, variant = "neutral", size = "sm", children, .
   };
   const sizes = { sm: "text-[10px] px-2 py-0.5", md: "text-xs px-2.5 py-1" };
   return (
-    <span className={cn("inline-flex items-center gap-1 border rounded-full font-semibold",
-      variants[variant], sizes[size], className)} {...props}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 border rounded-full font-semibold",
+        variants[variant],
+        sizes[size],
+        className
+      )}
+      {...props}
+    >
       {children}
     </span>
   );
@@ -71,13 +92,17 @@ export function StatCard({ label, value, sub, trend, icon, className, glow }: St
         </div>
       )}
       <div className="min-w-0">
-        <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium mb-1">{label}</p>
+        <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-medium mb-1">
+          {label}
+        </p>
         <p className={cn(
           "text-lg font-bold font-display leading-none",
           trend === "up"   ? "text-bull"
           : trend === "down" ? "text-bear"
           : "text-foreground"
-        )}>{value}</p>
+        )}>
+          {value}
+        </p>
         {sub && <p className="text-[10px] text-muted-foreground mt-1">{sub}</p>}
       </div>
     </div>
@@ -90,9 +115,14 @@ export function ConfidenceBar({ value, className }: { value: number; className?:
   return (
     <div className={cn("flex items-center gap-2", className)}>
       <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${value}%` }} />
+        <div
+          className={cn("h-full rounded-full transition-all", color)}
+          style={{ width: `${value}%` }}
+        />
       </div>
-      <span className="text-[10px] font-mono text-muted-foreground w-8 text-right">{value.toFixed(0)}%</span>
+      <span className="text-[10px] font-mono text-muted-foreground w-8 text-right">
+        {value.toFixed(0)}%
+      </span>
     </div>
   );
 }
@@ -103,12 +133,22 @@ export function Divider({ className }: { className?: string }) {
 }
 
 // ── Empty state ───────────────────────────────────────────────────────────────
-export function Empty({ icon, title, description }: { icon?: React.ReactNode; title: string; description?: string }) {
+export function Empty({
+  icon,
+  title,
+  description,
+}: {
+  icon?: React.ReactNode;
+  title: string;
+  description?: string;
+}) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center gap-3">
       {icon && <div className="text-muted-foreground/40 mb-1">{icon}</div>}
       <p className="text-sm font-semibold text-muted-foreground">{title}</p>
-      {description && <p className="text-xs text-muted-foreground/60 max-w-xs">{description}</p>}
+      {description && (
+        <p className="text-xs text-muted-foreground/60 max-w-xs">{description}</p>
+      )}
     </div>
   );
 }
@@ -124,13 +164,16 @@ export function Tabs({ tabs, active, onChange, className }: TabsProps) {
   return (
     <div className={cn("flex gap-1 bg-muted/40 p-1 rounded-xl border border-border", className)}>
       {tabs.map(({ key, label, icon }) => (
-        <button key={key} onClick={() => onChange(key)}
+        <button
+          key={key}
+          onClick={() => onChange(key)}
           className={cn(
             "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
             active === key
               ? "bg-card border border-border text-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground"
-          )}>
+          )}
+        >
           {icon}
           {label}
         </button>
@@ -138,3 +181,12 @@ export function Tabs({ tabs, active, onChange, className }: TabsProps) {
     </div>
   );
 }
+
+// ── Re-export feedback primitives so all pages import from one place ──────────
+export {
+  Spinner,
+  LoadingOverlay,
+  ErrorBanner,
+  StatusBar,
+  ActionButton,
+} from "@/components/ui/feedback";

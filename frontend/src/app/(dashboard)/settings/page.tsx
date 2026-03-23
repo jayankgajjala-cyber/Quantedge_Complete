@@ -1,14 +1,22 @@
 "use client";
 import { useState } from "react";
-import { Settings, Server, Zap, Database, Key, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  Settings, Server, Zap, Database, Key,
+  AlertCircle, CheckCircle2, Loader2, Clock,
+} from "lucide-react";
 import { toast } from "sonner";
 import { api, getErrorMessage } from "@/lib/api";
 import { runBacktest } from "@/hooks/useData";
 import { useAuthStore } from "@/lib/store";
-import { Card, CardHeader, CardContent, Badge } from "@/components/ui";
+import {
+  Card, CardHeader, CardContent,
+  ErrorBanner, ActionButton,
+} from "@/components/ui";
 import { cn } from "@/lib/utils";
 
-function SettingRow({ label, value, status }: { label: string; value: string; status?: "ok" | "warn" | "error" }) {
+function SettingRow({
+  label, value, status,
+}: { label: string; value: string; status?: "ok" | "warn" | "error" }) {
   return (
     <div className="flex items-center justify-between py-3 border-b border-border/40 last:border-0">
       <span className="text-xs text-muted-foreground">{label}</span>
@@ -24,41 +32,82 @@ function SettingRow({ label, value, status }: { label: string; value: string; st
 
 export default function SettingsPage() {
   const username = useAuthStore((s) => s.username);
+
   const [backtesting, setBacktesting] = useState(false);
+  const [btProgress,  setBtProgress]  = useState("");
+  const [btError,     setBtError]     = useState("");
+
   const [detecting,   setDetecting]   = useState(false);
+  const [detectMsg,   setDetectMsg]   = useState("");
+  const [detectError, setDetectError] = useState("");
+
   const [refreshing,  setRefreshing]  = useState(false);
+  const [refreshError,setRefreshError]= useState("");
   const [symbols,     setSymbols]     = useState("");
 
   async function handleBacktest() {
     setBacktesting(true);
+    setBtError("");
+    setBtProgress("");
+
     try {
       const syms = symbols.trim()
         ? symbols.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
         : [];
 
       if (syms.length > 0) {
-        // runBacktest uses apiSlow (120s timeout) — backtest takes 15-45s per ticker
+        setBtProgress(`Running backtest for ${syms.length} ticker${syms.length > 1 ? "s" : ""}… (ETA: ~${syms.length * 30}s)`);
         const results = await Promise.allSettled(
           syms.map((ticker) => runBacktest(ticker))
         );
         const succeeded = results.filter((r) => r.status === "fulfilled").length;
-        toast.success(`Backtest complete: ${succeeded}/${syms.length} tickers processed`);
+        const failed    = results.filter((r) => r.status === "rejected").length;
+        setBtProgress("");
+        if (succeeded > 0) {
+          toast.success(`✅ Backtest complete: ${succeeded}/${syms.length} tickers processed`, {
+            description: failed > 0 ? `${failed} tickers failed — check ticker symbols` : undefined,
+            duration: 6000,
+          });
+        }
+        if (failed > 0 && succeeded === 0) {
+          setBtError(`All ${failed} backtests failed. Check ticker symbols and backend health.`);
+        }
       } else {
-        // Run for all holdings using the slow client
         const { data: holdings } = await api.get("/trading/portfolio/holdings");
         if (!holdings?.length) {
-          toast.error("No holdings found. Upload a portfolio CSV first.");
+          toast.error("No holdings found — upload a portfolio CSV first");
           return;
         }
-        toast.info(`Starting backtest for ${holdings.length} holdings — this may take a few minutes`);
-        // Fire-and-forget per ticker — each uses 120s timeout via runBacktest
-        holdings.forEach((h: any) =>
-          runBacktest(h.symbol).catch(() => null)
+        setBtProgress(`Dispatching backtest for ${holdings.length} holdings… (ETA: ~${Math.ceil(holdings.length * 0.5)} minutes)`);
+        toast.info(`⏳ Backtest started for ${holdings.length} holdings`, {
+          description: "Each ticker takes 15–45s. Results appear in the Leaderboard when done.",
+          duration: 8000,
+        });
+        // Fire-and-forget — each uses 120s timeout via runBacktest
+        let completed = 0;
+        const total = holdings.length;
+        await Promise.allSettled(
+          holdings.map(async (h: any) => {
+            try {
+              await runBacktest(h.symbol);
+              completed++;
+              setBtProgress(`Completed ${completed}/${total} — ${h.symbol} done`);
+            } catch {
+              completed++;
+            }
+          })
         );
-        toast.success("Backtest jobs dispatched for all holdings");
+        setBtProgress("");
+        toast.success(`✅ Backtest complete for all ${total} holdings`, {
+          description: "Check the Leaderboard page for results",
+          duration: 6000,
+        });
       }
     } catch (err: any) {
-      toast.error(getErrorMessage(err));
+      setBtProgress("");
+      const msg = getErrorMessage(err);
+      setBtError(`Backtest failed: ${msg}`);
+      toast.error(`Backtest failed: ${msg}`);
     } finally {
       setBacktesting(false);
     }
@@ -66,18 +115,21 @@ export default function SettingsPage() {
 
   async function handleDetectRegime() {
     setDetecting(true);
+    setDetectError("");
+    setDetectMsg("Detecting market regime… (ETA: ~30–60 seconds)");
+
     try {
-      // POST /api/dashboard/scan-now now:
-      //   1. Calls detect_and_persist() first (fresh regime written to DB)
-      //   2. Runs signal scan (reads fresh regime)
-      //   3. Returns regime_label + regime_summary in the response body
-      // No second GET needed — the regime is in the scan response.
       const { data } = await api.post("/dashboard/scan-now");
-      toast.success(`Regime: ${data.regime_label ?? "Updated"}`, {
+      setDetectMsg("");
+      toast.success(`✅ Regime: ${data.regime_label ?? "Updated"}`, {
         description: data.regime_summary ?? `${data.signals_count ?? 0} signals generated`,
+        duration: 6000,
       });
     } catch (err: any) {
-      toast.error(getErrorMessage(err));
+      setDetectMsg("");
+      const msg = getErrorMessage(err);
+      setDetectError(`Detection failed: ${msg}`);
+      toast.error(`Regime detection failed: ${msg}`);
     } finally {
       setDetecting(false);
     }
@@ -85,22 +137,30 @@ export default function SettingsPage() {
 
   async function handleRefreshResearch() {
     setRefreshing(true);
+    setRefreshError("");
+
     try {
-      // FIXED: was POST /api/research/portfolio/refresh (did not exist)
-      // Workaround: fetch holdings then trigger research for each
       const { data: holdings } = await api.get("/trading/portfolio/holdings");
       if (!holdings?.length) {
-        toast.error("No holdings found. Upload a portfolio CSV first.");
+        toast.error("No holdings found — upload a portfolio CSV first");
         return;
       }
-      // Trigger research refresh for first 5 holdings (cache invalidates on backend)
       const tickers = holdings.slice(0, 5).map((h: any) => h.symbol);
+      toast.info(`⏳ Refreshing research for: ${tickers.join(", ")}`, {
+        description: "ETA: ~20–40 seconds per ticker",
+        duration: 5000,
+      });
       await Promise.allSettled(
         tickers.map((t: string) => api.get(`/dashboard/research/${t}`))
       );
-      toast.success(`Research refreshed for ${tickers.length} holdings`);
+      toast.success(`✅ Research refreshed for ${tickers.length} holdings`, {
+        description: "News, sentiment, and forecasts are up to date",
+        duration: 5000,
+      });
     } catch (err: any) {
-      toast.error(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      setRefreshError(`Research refresh failed: ${msg}`);
+      toast.error(`Refresh failed: ${msg}`);
     } finally {
       setRefreshing(false);
     }
@@ -115,6 +175,7 @@ export default function SettingsPage() {
         <p className="text-muted-foreground text-xs mt-0.5">System configuration and manual controls</p>
       </div>
 
+      {/* System info */}
       <Card>
         <CardHeader>
           <span className="text-xs font-semibold flex items-center gap-1.5">
@@ -122,16 +183,16 @@ export default function SettingsPage() {
           </span>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Logged in as"   value={username || "—"}    status="ok" />
-          <SettingRow label="Backend API"    value={API_URL}            status="ok" />
-          <SettingRow label="Auth method"    value="bcrypt + OTP 2FA"   status="ok" />
-          <SettingRow label="JWT algorithm"  value="HS256"              status="ok" />
-          <SettingRow label="Regime refresh" value="Every 5 minutes"    status="ok" />
-          <SettingRow label="News cache"     value="60 minutes"         status="ok" />
-          <SettingRow label="Signal scan"    value="Every 5 minutes"    status="ok" />
+          <SettingRow label="Logged in as"   value={username || "—"}  status="ok" />
+          <SettingRow label="Backend API"    value={API_URL}           status="ok" />
+          <SettingRow label="Auth method"    value="bcrypt + OTP 2FA"  status="ok" />
+          <SettingRow label="Regime refresh" value="Every 5 minutes"   status="ok" />
+          <SettingRow label="News cache"     value="60 minutes"        status="ok" />
+          <SettingRow label="Signal scan"    value="Every 5 minutes"   status="ok" />
         </CardContent>
       </Card>
 
+      {/* Env vars */}
       <Card>
         <CardHeader>
           <span className="text-xs font-semibold flex items-center gap-1.5">
@@ -151,13 +212,15 @@ export default function SettingsPage() {
                 <div className="text-xs font-mono font-semibold text-foreground">{label}</div>
                 <div className="text-[10px] text-muted-foreground mt-0.5">{desc}</div>
               </div>
-              <a href={url} target="_blank" rel="noopener noreferrer"
-                className="text-[10px] text-primary hover:underline">Get key →</a>
+              <a href={url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-primary hover:underline">
+                Get key →
+              </a>
             </div>
           ))}
         </CardContent>
       </Card>
 
+      {/* Manual controls */}
       <Card>
         <CardHeader>
           <span className="text-xs font-semibold flex items-center gap-1.5">
@@ -165,56 +228,113 @@ export default function SettingsPage() {
           </span>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-xs font-semibold">Run Regime Detection</div>
-              <div className="text-[10px] text-muted-foreground mt-0.5">
-                Force an immediate Nifty 50 regime classification + signal scan
+
+          {/* Detect regime */}
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs font-semibold">Run Regime Detection + Signal Scan</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  Force immediate Nifty 50 regime classification + full signal scan across all holdings
+                </div>
               </div>
+              <ActionButton
+                onClick={handleDetectRegime}
+                loading={detecting}
+                loadingLabel="Detecting…"
+                icon={<Zap size={11} />}
+                variant="primary"
+                size="sm"
+              >
+                Detect Now
+              </ActionButton>
             </div>
-            <button onClick={handleDetectRegime} disabled={detecting}
-              className="shrink-0 px-4 py-2 rounded-xl border border-primary/30 bg-primary/10 text-primary text-xs font-semibold hover:bg-primary/20 transition-all disabled:opacity-60 flex items-center gap-1.5">
-              {detecting ? <Loader2 size={11} className="animate-spin" /> : <Zap size={11} />}
-              Detect Now
-            </button>
+            {detectMsg && (
+              <div className="flex items-center gap-2 text-[10px] text-primary/80 bg-primary/5 rounded-lg px-3 py-2">
+                <Clock size={10} />
+                <span>{detectMsg}</span>
+              </div>
+            )}
+            {detectError && (
+              <ErrorBanner
+                message={detectError}
+                onDismiss={() => setDetectError("")}
+                onRetry={handleDetectRegime}
+              />
+            )}
           </div>
 
           <div className="h-px bg-border" />
 
+          {/* Backtest */}
           <div className="space-y-3">
             <div>
               <div className="text-xs font-semibold">Run 10-Year Backtest</div>
               <div className="text-[10px] text-muted-foreground mt-0.5">
-                Runs all 8 strategies across your portfolio. Leave blank for all holdings.
+                Fetches 10yr OHLCV data and runs 8 strategies per ticker.
+                Leave blank to run for all holdings.{" "}
+                <span className="text-gold">ETA: ~30–45s per ticker.</span>
               </div>
             </div>
             <input
               value={symbols}
               onChange={(e) => setSymbols(e.target.value)}
-              placeholder="Comma-separated symbols (blank = entire portfolio)"
+              placeholder="RELIANCE, TCS, INFY  (blank = entire portfolio)"
               className="w-full bg-muted/50 border border-border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/30 transition-all"
+              disabled={backtesting}
             />
-            <button onClick={handleBacktest} disabled={backtesting}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/30 transition-all disabled:opacity-60">
-              {backtesting ? <Loader2 size={11} className="animate-spin" /> : <Database size={11} />}
-              {backtesting ? "Running backtest…" : "Start Backtest"}
-            </button>
+            <ActionButton
+              onClick={handleBacktest}
+              loading={backtesting}
+              loadingLabel={btProgress || "Running backtest…"}
+              icon={<Database size={11} />}
+              variant="secondary"
+              size="sm"
+            >
+              Start Backtest
+            </ActionButton>
+            {btProgress && !backtesting && (
+              <p className="text-[10px] text-muted-foreground">{btProgress}</p>
+            )}
+            {btError && (
+              <ErrorBanner
+                message={btError}
+                onDismiss={() => setBtError("")}
+                onRetry={handleBacktest}
+              />
+            )}
           </div>
 
           <div className="h-px bg-border" />
 
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-xs font-semibold">Refresh Portfolio Research</div>
-              <div className="text-[10px] text-muted-foreground mt-0.5">
-                Fetches fresh news + sentiment for your top holdings
+          {/* Refresh research */}
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs font-semibold">Refresh Portfolio Research</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  Fetches fresh news + FinBERT sentiment for top 5 holdings.{" "}
+                  <span className="text-gold">ETA: ~20–40s per ticker.</span>
+                </div>
               </div>
+              <ActionButton
+                onClick={handleRefreshResearch}
+                loading={refreshing}
+                loadingLabel="Refreshing…"
+                icon={<Server size={11} />}
+                variant="secondary"
+                size="sm"
+              >
+                Refresh
+              </ActionButton>
             </div>
-            <button onClick={handleRefreshResearch} disabled={refreshing}
-              className="shrink-0 px-4 py-2 rounded-xl border border-border text-xs text-muted-foreground hover:text-foreground hover:border-primary/30 transition-all disabled:opacity-60 flex items-center gap-1.5">
-              {refreshing ? <Loader2 size={11} className="animate-spin" /> : <Server size={11} />}
-              Refresh
-            </button>
+            {refreshError && (
+              <ErrorBanner
+                message={refreshError}
+                onDismiss={() => setRefreshError("")}
+                onRetry={handleRefreshResearch}
+              />
+            )}
           </div>
         </CardContent>
       </Card>

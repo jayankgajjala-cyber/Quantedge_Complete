@@ -6,7 +6,8 @@ import {
 } from "lucide-react";
 import { useLeaderboard } from "@/hooks/useData";
 import { cn, fmt, fmtPct } from "@/lib/utils";
-import { Card, CardHeader, CardContent, Badge, Skeleton, Empty } from "@/components/ui";
+import { Card, CardHeader, CardContent, Badge, Skeleton, Empty, ErrorBanner } from "@/components/ui";
+import { getErrorMessage } from "@/lib/api";
 import type { StrategyResult } from "@/types";
 
 const QUALITY_BADGE: Record<string, { label: string; variant: "bull" | "gold" | "bear" | "neutral" }> = {
@@ -25,7 +26,7 @@ function SortIcon({ field, active, dir }: { field: string; active: string; dir: 
 type SortField = "sharpe_ratio" | "cagr" | "win_rate" | "max_drawdown";
 
 export default function LeaderboardPage() {
-  const { data: rows, isLoading, mutate } = useLeaderboard();
+  const { data: rows, isLoading, error, mutate } = useLeaderboard();
   const [sortField, setSortField] = useState<SortField>("sharpe_ratio");
   const [sortDir,   setSortDir]   = useState<"asc" | "desc">("desc");
   const [filterQuality, setFilterQuality] = useState<string>("all");
@@ -139,6 +140,15 @@ export default function LeaderboardPage() {
           </div>
         ))}
       </div>
+
+      {/* Leaderboard fetch error */}
+      {error && !isLoading && (
+        <ErrorBanner
+          title="Failed to load leaderboard"
+          message={getErrorMessage(error)}
+          onRetry={() => mutate()}
+        />
+      )}
 
       {/* Filter + Table */}
       <Card>
