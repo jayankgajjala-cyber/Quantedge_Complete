@@ -5,7 +5,7 @@ import {
   AlertCircle, CheckCircle2, Loader2, Clock,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, getErrorMessage } from "@/lib/api";
+import { api, apiSlow, getErrorMessage } from "@/lib/api";
 import { runBacktest } from "@/hooks/useData";
 import { useAuthStore } from "@/lib/store";
 import {
@@ -45,6 +45,12 @@ export default function SettingsPage() {
   const [refreshError,setRefreshError]= useState("");
   const [symbols,     setSymbols]     = useState("");
 
+  // ── Run Backtest ─────────────────────────────────────────────────────────────
+  // FIX: list_holdings now always returns a plain array. Previously when
+  // no holdings existed the response was {"status":"success","data":[],"message":"..."}
+  // so `holdings` was that wrapper object, not an array. `.length` was undefined,
+  // the `!holdings?.length` check passed as truthy, and the error toast fired
+  // even when holdings existed. Now we get `[]` and the guard works correctly.
   async function handleBacktest() {
     setBacktesting(true);
     setBtError("");
@@ -56,6 +62,7 @@ export default function SettingsPage() {
         : [];
 
       if (syms.length > 0) {
+        // Explicit tickers provided — run for those
         setBtProgress(`Running backtest for ${syms.length} ticker${syms.length > 1 ? "s" : ""}… (ETA: ~${syms.length * 30}s)`);
         const results = await Promise.allSettled(
           syms.map((ticker) => runBacktest(ticker))
@@ -73,17 +80,24 @@ export default function SettingsPage() {
           setBtError(`All ${failed} backtests failed. Check ticker symbols and backend health.`);
         }
       } else {
+        // No tickers — run for entire portfolio
+        // FIX: list_holdings returns plain array (not wrapped). No need to
+        // unpack .data — the array IS the response body.
         const { data: holdings } = await api.get("/trading/portfolio/holdings");
-        if (!holdings?.length) {
+
+        // holdings is now always an array ([] when empty, [{...},...] otherwise)
+        if (!Array.isArray(holdings) || holdings.length === 0) {
           toast.error("No holdings found — upload a portfolio CSV first");
+          setBacktesting(false);
           return;
         }
+
         setBtProgress(`Dispatching backtest for ${holdings.length} holdings… (ETA: ~${Math.ceil(holdings.length * 0.5)} minutes)`);
         toast.info(`⏳ Backtest started for ${holdings.length} holdings`, {
           description: "Each ticker takes 15–45s. Results appear in the Leaderboard when done.",
           duration: 8000,
         });
-        // Fire-and-forget — each uses 120s timeout via runBacktest
+
         let completed = 0;
         const total = holdings.length;
         await Promise.allSettled(
@@ -113,13 +127,22 @@ export default function SettingsPage() {
     }
   }
 
+  // ── Detect Regime ─────────────────────────────────────────────────────────
+  // FIX: Now uses `apiSlow` (120s timeout) instead of `api` (30s timeout).
+  // The scan-now endpoint runs:
+  //   Phase 1 — Regime detection:  ~20–40s
+  //   Phase 2 — Full signal scan:  ~30–60s
+  //   Total:                       up to ~80s
+  // With the 30s `api` client, the request ALWAYS timed out before completing.
+  // The frontend would show "Detection failed (timeout)" while the backend
+  // actually finished successfully 10–20 seconds later. Now using apiSlow.
   async function handleDetectRegime() {
     setDetecting(true);
     setDetectError("");
-    setDetectMsg("Detecting market regime… (ETA: ~30–60 seconds)");
+    setDetectMsg("Detecting market regime… (ETA: ~30–80 seconds)");
 
     try {
-      const { data } = await api.post("/dashboard/scan-now");
+      const { data } = await apiSlow.post("/dashboard/scan-now");
       setDetectMsg("");
       toast.success(`✅ Regime: ${data.regime_label ?? "Updated"}`, {
         description: data.regime_summary ?? `${data.signals_count ?? 0} signals generated`,
@@ -135,16 +158,22 @@ export default function SettingsPage() {
     }
   }
 
+  // ── Refresh Research ──────────────────────────────────────────────────────
+  // FIX: Same holdings response fix as handleBacktest above.
   async function handleRefreshResearch() {
     setRefreshing(true);
     setRefreshError("");
 
     try {
       const { data: holdings } = await api.get("/trading/portfolio/holdings");
-      if (!holdings?.length) {
+
+      // FIX: holdings is now always an array
+      if (!Array.isArray(holdings) || holdings.length === 0) {
         toast.error("No holdings found — upload a portfolio CSV first");
+        setRefreshing(false);
         return;
       }
+
       const tickers = holdings.slice(0, 5).map((h: any) => h.symbol);
       toast.info(`⏳ Refreshing research for: ${tickers.join(", ")}`, {
         description: "ETA: ~20–40 seconds per ticker",
@@ -229,13 +258,14 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-5">
 
-          {/* Detect regime */}
+          {/* Detect regime — FIX: now uses apiSlow via handleDetectRegime */}
           <div className="space-y-2">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-xs font-semibold">Run Regime Detection + Signal Scan</div>
                 <div className="text-[10px] text-muted-foreground mt-0.5">
-                  Force immediate Nifty 50 regime classification + full signal scan across all holdings
+                  Force immediate Nifty 50 regime classification + full signal scan across all holdings.{" "}
+                  <span className="text-gold">ETA: ~30–80 seconds.</span>
                 </div>
               </div>
               <ActionButton

@@ -11,6 +11,16 @@ POST /api/dashboard/scan-now      → force immediate signal scan
 GET  /api/dashboard/research/{ticker} → full news + sentiment + forecast
 GET  /api/dashboard/research/{ticker}/articles → raw news articles
 GET  /api/dashboard/leaderboard   → top strategies by Sharpe
+GET  /api/dashboard/notifications → recent alert dispatch log
+
+FIX 1: get_dashboard() had a syntax/indentation bug — `try:` block contained
+        only the `regime` query (wrong indent), then `subq` and everything
+        else ran OUTSIDE the try. This caused an IndentationError on import
+        and crashed the entire dashboard endpoint on every call.
+        Fixed: all logic is now properly indented inside the try block.
+
+FIX 2: Notification confidence null-check — backend already returns None
+        correctly, but surfaced as TypeError in Header.tsx. Now emitted safely.
 """
 
 import json
@@ -188,55 +198,66 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
+    """
+    FIX 1: The original had a critical IndentationError — the `try:` block
+    only captured the regime query (with wrong 1-space indent), then `subq`
+    and all downstream code ran OUTSIDE the try block entirely.
+    This caused an IndentationError on startup and a 500 on every call.
+    Now ALL logic is correctly indented inside a single try/except.
+    """
     try:
-     regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
+        regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
-    subq = (
-        db.query(
-            FinalSignal.ticker,
-            func.max(FinalSignal.generated_at).label("latest"),
+        subq = (
+            db.query(
+                FinalSignal.ticker,
+                func.max(FinalSignal.generated_at).label("latest"),
+            )
+            .group_by(FinalSignal.ticker)
+            .subquery()
         )
-        .group_by(FinalSignal.ticker)
-        .subquery()
-    )
-    signals = (
-        db.query(FinalSignal)
-        .join(subq, (FinalSignal.ticker == subq.c.ticker) &
-                    (FinalSignal.generated_at == subq.c.latest))
-        .filter(FinalSignal.status == SignalStatus.ACTIVE)
-        .all()
-    )
+        signals = (
+            db.query(FinalSignal)
+            .join(subq, (FinalSignal.ticker == subq.c.ticker) &
+                        (FinalSignal.generated_at == subq.c.latest))
+            .filter(FinalSignal.status == SignalStatus.ACTIVE)
+            .all()
+        )
 
-    buy_count  = sum(1 for s in signals if s.signal == SignalType.BUY)
-    sell_count = sum(1 for s in signals if s.signal == SignalType.SELL)
-    hold_count = len(signals) - buy_count - sell_count
+        buy_count  = sum(1 for s in signals if s.signal == SignalType.BUY)
+        sell_count = sum(1 for s in signals if s.signal == SignalType.SELL)
+        hold_count = len(signals) - buy_count - sell_count
 
-    top_buys = sorted(
-        [s for s in signals if s.signal == SignalType.BUY],
-        key=lambda s: s.confidence, reverse=True,
-    )[:10]
+        top_buys = sorted(
+            [s for s in signals if s.signal == SignalType.BUY],
+            key=lambda s: s.confidence, reverse=True,
+        )[:10]
 
-    # Use _signal_to_out so top_signals have the full shape the frontend type expects
-    top_signals_out = [_signal_to_out(s).model_dump() for s in top_buys]
+        top_signals_out = [_signal_to_out(s).model_dump() for s in top_buys]
 
-    # Compute global bias flag
-    total_sigs = len(signals)
-    hold_sigs  = sum(1 for s in signals if s.signal == SignalType.HOLD)
-    bias_flag  = total_sigs > 0 and (hold_sigs / total_sigs) >= 0.80
-    bias_msg   = f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced" if bias_flag else ""
+        total_sigs = len(signals)
+        hold_sigs  = sum(1 for s in signals if s.signal == SignalType.HOLD)
+        bias_flag  = total_sigs > 0 and (hold_sigs / total_sigs) >= 0.80
+        bias_msg   = (
+            f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced"
+            if bias_flag else ""
+        )
 
-    return {
-        "regime":             regime.regime_label.value if regime else "UNKNOWN",
-        "regime_confidence":  regime.confidence_score if regime else 0.0,
-        "regime_summary":     regime.regime_summary if regime else None,
-        "total_buy_signals":  buy_count,
-        "total_sell_signals": sell_count,
-        "total_hold_signals": hold_count,
-        "top_signals":        top_signals_out,
-        "bias_warning":       bias_flag,
-        "bias_message":       bias_msg,
-        "last_scan_at":       signals[0].generated_at.isoformat() if signals else None,
-    }
+        return {
+            "regime":             regime.regime_label.value if regime else "UNKNOWN",
+            "regime_confidence":  regime.confidence_score if regime else 0.0,
+            "regime_summary":     regime.regime_summary if regime else None,
+            "total_buy_signals":  buy_count,
+            "total_sell_signals": sell_count,
+            "total_hold_signals": hold_count,
+            "top_signals":        top_signals_out,
+            "bias_warning":       bias_flag,
+            "bias_message":       bias_msg,
+            "last_scan_at":       signals[0].generated_at.isoformat() if signals else None,
+        }
+    except Exception as exc:
+        logger.error("get_dashboard failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Dashboard failed: {exc}")
 
 
 @router.get("/regime", response_model=RegimeOut, summary="Latest Nifty 50 market regime snapshot")
@@ -319,9 +340,8 @@ def get_ticker_signals(
 def scan_now(db: Session = Depends(get_db)):
     """
     Two-phase synchronous pipeline:
-    1. Regime detection  — calls RegimeService.detect_and_persist() so the regime
-       written to DB is fresh (not the stale scheduler value from hours ago).
-    2. Signal scan       — SignalEngine.run_scan() reads the newly persisted regime.
+    1. Regime detection  — calls RegimeService.detect_and_persist()
+    2. Signal scan       — SignalEngine.run_scan()
 
     Both phases run in the same request so the toast in the UI reflects the
     actual regime that was just computed, not a cached one.
@@ -336,15 +356,12 @@ def scan_now(db: Session = Depends(get_db)):
                 new_regime.regime_label.value if new_regime else "unknown",
             )
         except Exception as regime_exc:
-            # Non-fatal: regime detection can fail (e.g. market closed, yfinance down)
-            # Signal scan will fall back to reading the last persisted regime from DB
             logger.warning("scan-now: regime detection failed (non-fatal): %s", regime_exc)
 
-        # Phase 2 — run signal scan (reads regime from DB, now fresh from phase 1)
+        # Phase 2 — run signal scan
         engine  = get_signal_engine()
         results = engine.run_scan()
 
-        # Return fresh regime label for the toast in the frontend
         regime_row = (
             db.query(MarketRegime)
             .order_by(desc(MarketRegime.timestamp))
@@ -352,10 +369,10 @@ def scan_now(db: Session = Depends(get_db)):
         )
 
         return {
-            "message":       f"Scan complete — {len(results)} signals generated",
-            "signals_count": len(results),
-            "signals":       results,
-            "regime_label":  regime_row.regime_label.value if regime_row else "UNKNOWN",
+            "message":        f"Scan complete — {len(results)} signals generated",
+            "signals_count":  len(results),
+            "signals":        results,
+            "regime_label":   regime_row.regime_label.value if regime_row else "UNKNOWN",
             "regime_summary": regime_row.regime_summary if regime_row else None,
         }
     except Exception as exc:
@@ -407,8 +424,7 @@ def get_news_articles(
     """
     Returns persisted NewsArticle rows ordered latest-first.
     Articles are written by NewsService.analyse() when /research/{ticker} is hit.
-    Returns [] (not 404) if no articles exist yet — frontend calls /research first
-    which triggers ingestion, then calls /articles.
+    Returns [] (not 404) if no articles exist yet.
     """
     rows = (
         db.query(NewsArticleModel)
@@ -437,9 +453,9 @@ def get_notifications(
     db:    Session = Depends(get_db),
 ):
     """
-    Returns the most recent entries from alert_dispatch_log — real alerts
-    that the scheduler fired (signal emails, SL hits, regime changes).
-    Used by the Header notification dropdown to replace hardcoded static data.
+    Returns the most recent entries from alert_dispatch_log.
+    FIX: confidence is emitted as float | null — Header.tsx now guards
+    against null before calling .toFixed().
     Returns [] when no alerts have been dispatched yet.
     """
     rows = (
@@ -453,7 +469,9 @@ def get_notifications(
             "id":          r.id,
             "ticker":      r.ticker,
             "signal_type": r.signal_type,
-            "confidence":  r.confidence,
+            # FIX: explicitly coerce to float or None — never let a DB
+            # Decimal type sneak through and crash JSON serialisation
+            "confidence":  float(r.confidence) if r.confidence is not None else None,
             "regime":      r.regime,
             "channel":     r.channel,
             "subject":     r.subject,
@@ -474,7 +492,6 @@ def get_leaderboard(
     q = db.query(StrategyPerformance).filter(
         StrategyPerformance.sharpe_ratio.isnot(None)
     )
-    # By default only return SUFFICIENT data quality rows; pass all_qualities=true for full table
     if not all_qualities:
         q = q.filter(StrategyPerformance.data_quality == DataQuality.SUFFICIENT)
 
