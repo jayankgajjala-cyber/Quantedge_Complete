@@ -30,7 +30,9 @@ export default function PortfolioPage() {
     const form = new FormData();
     form.append("file", file);
     try {
-      const { data } = await api.post("/portfolio/upload-portfolio", form, {
+      // FIXED: was /portfolio/upload-portfolio
+      // Actual backend route: POST /api/trading/portfolio/upload
+      const { data } = await api.post("/trading/portfolio/upload", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       toast.success(`Imported ${data.imported} holdings`, {
@@ -38,7 +40,7 @@ export default function PortfolioPage() {
       });
       mutate();
     } catch (err: any) {
-      toast.error(err.response?.data?.detail || "Upload failed");
+      toast.error(err.response?.data?.detail || "Upload failed — check CSV format");
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -47,7 +49,6 @@ export default function PortfolioPage() {
 
   return (
     <div className="space-y-5 animate-fade-in">
-      {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-display font-bold text-xl">Portfolio</h1>
@@ -73,7 +74,6 @@ export default function PortfolioPage() {
         </div>
       </div>
 
-      {/* Stats row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
           label="Portfolio Value"
@@ -107,7 +107,6 @@ export default function PortfolioPage() {
         />
       </div>
 
-      {/* Holdings table */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -148,7 +147,7 @@ export default function PortfolioPage() {
                     const curVal = (h.current_price ?? h.average_price) * h.quantity;
                     return (
                       <tr key={h.id}
-                        className="border-b border-border/40 hover:bg-muted/30 transition-colors group"
+                        className="border-b border-border/40 hover:bg-muted/30 transition-colors"
                         style={{ animationDelay: `${i * 30}ms` }}>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2.5">
