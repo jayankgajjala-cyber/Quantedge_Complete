@@ -62,17 +62,19 @@ export function useResearch(ticker: string | null) {
   );
 }
 
-// FIXED: was /research/{ticker}/news → route does not exist yet
-// Now fetches from the news_articles stored in DB via dashboard research endpoint
-// Returns the articles array from within the research response
+// ── News Articles ─────────────────────────────────────────────────────────────
+// FIX: Previously this hook hardcoded `return []` with a TODO comment.
+// The backend stores articles in the news_articles table after analyse() runs,
+// but had no endpoint to expose them. Two changes were required:
+//   1. New backend route: GET /api/dashboard/research/{ticker}/articles
+//   2. This hook now calls that route via the standard `fetcher`
+// NOTE: Pass `ticker` as null until research has loaded — this ensures
+//       NewsService.analyse() has already persisted the articles before we
+//       attempt to fetch them.
 export function useNews(ticker: string | null) {
   return useSWR<NewsArticle[]>(
-    ticker ? `/dashboard/research/${ticker}` : null,
-    (url: string) => api.get(url).then((r) => {
-      // Backend returns executive_summary + metadata but not raw articles
-      // Return empty array — articles shown via research data
-      return [];
-    }),
+    ticker ? `/dashboard/research/${ticker}/articles` : null,
+    fetcher,
     { refreshInterval: 60 * 60 * 1000 }
   );
 }

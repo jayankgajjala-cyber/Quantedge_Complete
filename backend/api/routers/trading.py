@@ -97,9 +97,50 @@ async def upload_portfolio(
             "imported": imported, "skipped": skipped}
 
 
-@router.get("/portfolio/holdings", summary="List all holdings")
+@router.get("/portfolio/holdings", summary="List all holdings with live P&L")
 def list_holdings(db: Session = Depends(get_db)):
-    return db.query(Holding).order_by(Holding.symbol).all()
+    """
+    Returns all holdings enriched with live LTP from yfinance.
+    current_price, pnl, and pnl_pct are computed here — they are NOT stored
+    in the DB (they change every tick). Falls back to average_price if the
+    yfinance call fails so the row is always valid.
+    """
+    holdings = db.query(Holding).order_by(Holding.symbol).all()
+    if not holdings:
+        return []
+
+    # Batch-fetch live prices for all symbols
+    live_prices: dict = {}
+    for h in holdings:
+        try:
+            info  = yf.Ticker(f"{h.symbol}.NS").fast_info
+            price = float(info.get("last_price") or info.get("previous_close") or 0)
+            if price > 0:
+                live_prices[h.symbol] = price
+        except Exception:
+            pass
+
+    result = []
+    for h in holdings:
+        ltp     = live_prices.get(h.symbol)
+        cost    = h.average_price * h.quantity
+        cur_val = (ltp * h.quantity) if ltp else cost
+        pnl     = cur_val - cost
+        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+        result.append({
+            "id":            h.id,
+            "symbol":        h.symbol,
+            "exchange":      getattr(h, "exchange", "NSE"),
+            "quantity":      h.quantity,
+            "average_price": h.average_price,
+            "current_price": round(ltp, 2) if ltp else None,
+            "pnl":           round(pnl, 2),
+            "pnl_pct":       round(pnl_pct, 2),
+            "sector":        getattr(h, "sector", None),
+            "data_quality":  h.data_quality.value if hasattr(h.data_quality, "value") else str(h.data_quality),
+            "uploaded_at":   h.updated_at.isoformat() if getattr(h, "updated_at", None) else None,
+        })
+    return result
 
 
 # ─── Budget helpers ───────────────────────────────────────────────────────────

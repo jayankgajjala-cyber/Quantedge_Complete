@@ -46,7 +46,12 @@ export default function ResearchPage() {
   const [input, setInput]   = useState(ticker);
 
   const { data: research, isLoading: resLoading, mutate: mutateRes } = useResearch(ticker);
-  const { data: news,     isLoading: newsLoading } = useNews(ticker);
+  // FIX: Only fetch articles AFTER research has loaded.
+  // useResearch() calls NewsService.analyse() which persists NewsArticle rows in the DB.
+  // If we fetch articles in parallel, the DB may not have them yet on first load.
+  // Passing null until `research` exists ensures the articles endpoint is only hit
+  // after the news pipeline has run and committed the rows.
+  const { data: news, isLoading: newsLoading } = useNews(research ? ticker : null);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();

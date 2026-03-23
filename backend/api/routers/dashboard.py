@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from backend.core.auth     import get_current_user
 from backend.core.database import get_db
 from backend.models.backtest  import StrategyPerformance
-from backend.models.news      import NewsAnalysis
+from backend.models.news      import NewsAnalysis, NewsArticle as NewsArticleModel
 from backend.models.regime    import MarketRegime
 from backend.models.signals   import FinalSignal, SignalStatus, SignalType
 from backend.services.news_service   import get_news_service
@@ -100,6 +100,18 @@ class LeaderboardEntry(BaseModel):
     win_rate:      Optional[float]
     max_drawdown:  Optional[float]
     years_of_data: Optional[float]
+
+
+class NewsArticleOut(BaseModel):
+    """Single news article with sentiment score — returned by /research/{ticker}/articles."""
+    title:           str
+    source_name:     str
+    published_at:    datetime
+    url:             Optional[str]
+    description:     Optional[str]
+    sentiment_score: Optional[float]
+    sentiment_label: Optional[str]
+    class Config: from_attributes = True
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -239,6 +251,42 @@ def get_research(ticker: str, db: Session = Depends(get_db)):
         coverage_message      = row.coverage_message,
         analysed_at           = row.analysed_at,
     )
+
+
+@router.get("/research/{ticker}/articles", response_model=list[NewsArticleOut],
+            summary="Raw news articles for a ticker with per-article sentiment (latest 30)")
+def get_news_articles(
+    ticker: str,
+    limit:  int     = Query(30, ge=1, le=100),
+    db:     Session = Depends(get_db),
+):
+    """
+    Returns persisted NewsArticle rows for a ticker, ordered latest-first.
+
+    Articles are stored by NewsService.analyse() when GET /research/{ticker}
+    is called. If no articles exist yet, returns an empty list — the frontend
+    calls /research/{ticker} first (useResearch hook), which triggers ingestion,
+    then calls this endpoint (useNews hook) to render the news feed.
+    """
+    rows = (
+        db.query(NewsArticleModel)
+          .filter(NewsArticleModel.ticker == ticker.upper())
+          .order_by(desc(NewsArticleModel.published_at))
+          .limit(limit)
+          .all()
+    )
+    return [
+        NewsArticleOut(
+            title           = r.title,
+            source_name     = r.source_name.value if r.source_name else "UNKNOWN",
+            published_at    = r.published_at,
+            url             = r.url,
+            description     = r.description,
+            sentiment_score = r.sentiment_score,
+            sentiment_label = r.sentiment_label.value if r.sentiment_label else None,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/leaderboard", response_model=list[LeaderboardEntry],

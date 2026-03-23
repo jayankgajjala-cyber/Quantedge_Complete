@@ -30,11 +30,12 @@ export default function PortfolioPage() {
     const form = new FormData();
     form.append("file", file);
     try {
-      // FIXED: was /portfolio/upload-portfolio
-      // Actual backend route: POST /api/trading/portfolio/upload
-      const { data } = await api.post("/trading/portfolio/upload", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // DO NOT manually set Content-Type here.
+      // When axios receives a FormData object, it automatically sets
+      // Content-Type: multipart/form-data; boundary=<generated>
+      // Manually setting it strips the boundary, causing FastAPI's
+      // UploadFile parser to receive a malformed body → silent 422 error.
+      const { data } = await api.post("/trading/portfolio/upload", form);
       toast.success(`Imported ${data.imported} holdings`, {
         description: `${data.skipped} rows skipped`,
       });
