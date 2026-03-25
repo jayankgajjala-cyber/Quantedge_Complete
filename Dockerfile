@@ -31,6 +31,10 @@ RUN pip install --upgrade pip setuptools wheel && \
 # ── Copy application code ─────────────────────────────────────────────
 COPY backend/ ./backend/
 
+
+COPY start.sh ./start.sh
+RUN chmod +x ./start.sh
+
 # ── Create necessary runtime directories ─────────────────────────────
 # /tmp is always writable on ephemeral containers
 RUN mkdir -p /tmp/parquet /tmp/yf_cache logs
@@ -49,9 +53,15 @@ EXPOSE 8000
 # ── Start command ─────────────────────────────────────────────────────
 # --workers 1 required for APScheduler (single-process) + SQLite compat
 # For PostgreSQL (production): increase to 2-4 workers with --preload-app
-CMD ["uvicorn", "backend.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "1", \
-     "--log-level", "info", \
-     "--access-log"]
+
+CMD ["sh", "start.sh"]
+
+
+#CMD ["uvicorn", "backend.main:app", \
+#     "--host", "0.0.0.0", \
+#     "--port", "8000", \
+#     "--workers", "1", \
+#     "--log-level", "info", \
+#     "--access-log"]
+
+
