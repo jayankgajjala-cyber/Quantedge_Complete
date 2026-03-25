@@ -3,24 +3,19 @@ backend/api/routers/dashboard.py
 ===================================
 All dashboard data endpoints — all JWT-protected.
 
+Router prefix: /dashboard
+Mounted in main.py as: app.include_router(dashboard_router, prefix="/api")
+
+Resulting URLs:
 GET  /api/dashboard/              → summary: regime + signals + budget
-GET  /api/dashboard/regime        → latest market regime snapshot
-GET  /api/dashboard/signals       → latest FinalSignals (with sentiment overlay)
+GET  /api/dashboard/regime        → latest market regime snapshot  (matches useLatestRegime)
+GET  /api/dashboard/signals       → latest FinalSignals            (matches useLatestSignals)
 GET  /api/dashboard/signals/{ticker} → signal history for one ticker
-POST /api/dashboard/scan-now      → force immediate signal scan
+POST /api/dashboard/scan-now      → force immediate signal scan    (matches triggerScanNow)
 GET  /api/dashboard/research/{ticker} → full news + sentiment + forecast
 GET  /api/dashboard/research/{ticker}/articles → raw news articles
-GET  /api/dashboard/leaderboard   → top strategies by Sharpe
-GET  /api/dashboard/notifications → recent alert dispatch log
-
-FIX 1: get_dashboard() had a syntax/indentation bug — `try:` block contained
-        only the `regime` query (wrong indent), then `subq` and everything
-        else ran OUTSIDE the try. This caused an IndentationError on import
-        and crashed the entire dashboard endpoint on every call.
-        Fixed: all logic is now properly indented inside the try block.
-
-FIX 2: Notification confidence null-check — backend already returns None
-        correctly, but surfaced as TypeError in Header.tsx. Now emitted safely.
+GET  /api/dashboard/notifications → recent alert dispatch log      (matches useNotifications)
+GET  /api/dashboard/leaderboard   → top strategies by Sharpe       (matches useLeaderboard)
 """
 
 import json
@@ -28,6 +23,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+import sqlalchemy.exc as sa_exc
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import desc, func
@@ -44,8 +40,9 @@ from backend.models.alerts           import AlertDispatchLog
 from backend.services.news_service   import get_news_service
 from backend.services.regime_service import get_regime_service
 from backend.services.signal_engine  import get_signal_engine
+from backend.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter(
     prefix="/dashboard",
     tags=["Dashboard"],
@@ -154,8 +151,11 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
     if getattr(r, "source_confirmations_json", None):
         try:
             confirmations = json.loads(r.source_confirmations_json)
-        except Exception:
-            pass
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to parse source_confirmations_json for signal id=%s: %s",
+                getattr(r, "id", "?"), exc,
+            )
 
     return SignalOut(
         id                   = r.id,
@@ -198,13 +198,6 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
-    """
-    FIX 1: The original had a critical IndentationError — the `try:` block
-    only captured the regime query (with wrong 1-space indent), then `subq`
-    and all downstream code ran OUTSIDE the try block entirely.
-    This caused an IndentationError on startup and a 500 on every call.
-    Now ALL logic is correctly indented inside a single try/except.
-    """
     try:
         regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
@@ -238,10 +231,7 @@ def get_dashboard(db: Session = Depends(get_db)):
         total_sigs = len(signals)
         hold_sigs  = sum(1 for s in signals if s.signal == SignalType.HOLD)
         bias_flag  = total_sigs > 0 and (hold_sigs / total_sigs) >= 0.80
-        bias_msg   = (
-            f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced"
-            if bias_flag else ""
-        )
+        bias_msg   = f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced" if bias_flag else ""
 
         return {
             "regime":             regime.regime_label.value if regime else "UNKNOWN",
@@ -255,14 +245,52 @@ def get_dashboard(db: Session = Depends(get_db)):
             "bias_message":       bias_msg,
             "last_scan_at":       signals[0].generated_at.isoformat() if signals else None,
         }
+
+    except sa_exc.OperationalError as exc:
+        logger.error("get_dashboard DB error: %s", exc, exc_info=True)
+        raise HTTPException(
+            503,
+            detail=(
+                "Cannot reach the database. "
+                "Check DATABASE_URL in Railway environment variables and Supabase status."
+            ),
+        )
+    except sa_exc.ProgrammingError as exc:
+        logger.error("get_dashboard schema error: %s", exc, exc_info=True)
+        raise HTTPException(
+            500,
+            detail=(
+                "A required database table is missing from Supabase. "
+                "Verify your DATABASE_URL points to the correct project and tables are initialised."
+            ),
+        )
     except Exception as exc:
-        logger.error("get_dashboard failed: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Dashboard failed: {exc}")
+        logger.error("get_dashboard unexpected error: %s", exc, exc_info=True)
+        raise HTTPException(500, detail=f"Dashboard load failed: {exc}")
 
 
 @router.get("/regime", response_model=RegimeOut, summary="Latest Nifty 50 market regime snapshot")
 def get_regime(db: Session = Depends(get_db)):
-    row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
+    try:
+        row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
+    except sa_exc.OperationalError as exc:
+        logger.error("get_regime DB connection error: %s", exc, exc_info=True)
+        raise HTTPException(
+            503,
+            detail=(
+                "Cannot reach the database to load regime data. "
+                "Check DATABASE_URL in Railway environment variables."
+            ),
+        )
+    except sa_exc.ProgrammingError as exc:
+        logger.error("get_regime schema error (table missing?): %s", exc, exc_info=True)
+        raise HTTPException(
+            500,
+            detail=(
+                "Database table 'market_regimes' not found in Supabase. "
+                "Verify your DATABASE_URL and run the app once to initialise tables."
+            ),
+        )
     if not row:
         raise HTTPException(404, "No regime data yet. Scheduler runs every 5 minutes.")
     return RegimeOut(
@@ -340,8 +368,9 @@ def get_ticker_signals(
 def scan_now(db: Session = Depends(get_db)):
     """
     Two-phase synchronous pipeline:
-    1. Regime detection  — calls RegimeService.detect_and_persist()
-    2. Signal scan       — SignalEngine.run_scan()
+    1. Regime detection  — calls RegimeService.detect_and_persist() so the regime
+       written to DB is fresh (not the stale scheduler value from hours ago).
+    2. Signal scan       — SignalEngine.run_scan() reads the newly persisted regime.
 
     Both phases run in the same request so the toast in the UI reflects the
     actual regime that was just computed, not a cached one.
@@ -356,12 +385,15 @@ def scan_now(db: Session = Depends(get_db)):
                 new_regime.regime_label.value if new_regime else "unknown",
             )
         except Exception as regime_exc:
+            # Non-fatal: regime detection can fail (e.g. market closed, yfinance down)
+            # Signal scan will fall back to reading the last persisted regime from DB
             logger.warning("scan-now: regime detection failed (non-fatal): %s", regime_exc)
 
-        # Phase 2 — run signal scan
+        # Phase 2 — run signal scan (reads regime from DB, now fresh from phase 1)
         engine  = get_signal_engine()
         results = engine.run_scan()
 
+        # Return fresh regime label for the toast in the frontend
         regime_row = (
             db.query(MarketRegime)
             .order_by(desc(MarketRegime.timestamp))
@@ -369,15 +401,24 @@ def scan_now(db: Session = Depends(get_db)):
         )
 
         return {
-            "message":        f"Scan complete — {len(results)} signals generated",
-            "signals_count":  len(results),
-            "signals":        results,
-            "regime_label":   regime_row.regime_label.value if regime_row else "UNKNOWN",
+            "message":       f"Scan complete — {len(results)} signals generated",
+            "signals_count": len(results),
+            "signals":       results,
+            "regime_label":  regime_row.regime_label.value if regime_row else "UNKNOWN",
             "regime_summary": regime_row.regime_summary if regime_row else None,
         }
+    except sa_exc.OperationalError as exc:
+        logger.error("scan-now DB error: %s", exc, exc_info=True)
+        raise HTTPException(
+            503,
+            detail=(
+                "Database connection lost during scan. "
+                "Check DATABASE_URL in Railway environment variables."
+            ),
+        )
     except Exception as exc:
         logger.error("on-demand scan failed: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Scan failed: {exc}. Check Railway backend logs for details.")
+        raise HTTPException(500, detail=f"Scan failed: {exc}. Check Railway backend logs for details.")
 
 
 @router.get("/research/{ticker}", response_model=ResearchOut,
@@ -386,9 +427,37 @@ def get_research(ticker: str, db: Session = Depends(get_db)):
     try:
         svc = get_news_service()
         row = svc.analyse(ticker.upper(), db)
+    except sa_exc.OperationalError as exc:
+        logger.error("get_research DB error for %s: %s", ticker, exc, exc_info=True)
+        raise HTTPException(
+            503,
+            detail=(
+                f"Database connection failed while loading research for '{ticker.upper()}'. "
+                "Check DATABASE_URL in Railway environment variables."
+            ),
+        )
+    except sa_exc.ProgrammingError as exc:
+        logger.error("get_research schema error for %s: %s", ticker, exc, exc_info=True)
+        raise HTTPException(
+            500,
+            detail=(
+                "Database table 'news_analysis' or 'news_articles' not found in Supabase. "
+                "Verify DATABASE_URL points to the correct Supabase project."
+            ),
+        )
+    except json.JSONDecodeError as exc:
+        logger.error("get_research JSON parse error for %s: %s", ticker, exc, exc_info=True)
+        raise HTTPException(
+            500,
+            detail=(
+                f"Malformed JSON in stored news data for '{ticker.upper()}'. "
+                "The executive_summary or sentiment field may be corrupted — "
+                "re-run the analysis to regenerate."
+            ),
+        )
     except Exception as exc:
-        logger.error("Research failed for %s: %s", ticker, exc, exc_info=True)
-        raise HTTPException(500, f"Research error: {exc}")
+        logger.error("get_research unexpected error for %s: %s", ticker, exc, exc_info=True)
+        raise HTTPException(500, detail=f"Research failed for '{ticker.upper()}': {exc}")
 
     bullets = json.loads(row.executive_summary or "[]")
     return ResearchOut(
@@ -424,7 +493,8 @@ def get_news_articles(
     """
     Returns persisted NewsArticle rows ordered latest-first.
     Articles are written by NewsService.analyse() when /research/{ticker} is hit.
-    Returns [] (not 404) if no articles exist yet.
+    Returns [] (not 404) if no articles exist yet — frontend calls /research first
+    which triggers ingestion, then calls /articles.
     """
     rows = (
         db.query(NewsArticleModel)
@@ -453,9 +523,9 @@ def get_notifications(
     db:    Session = Depends(get_db),
 ):
     """
-    Returns the most recent entries from alert_dispatch_log.
-    FIX: confidence is emitted as float | null — Header.tsx now guards
-    against null before calling .toFixed().
+    Returns the most recent entries from alert_dispatch_log — real alerts
+    that the scheduler fired (signal emails, SL hits, regime changes).
+    Used by the Header notification dropdown to replace hardcoded static data.
     Returns [] when no alerts have been dispatched yet.
     """
     rows = (
@@ -469,9 +539,7 @@ def get_notifications(
             "id":          r.id,
             "ticker":      r.ticker,
             "signal_type": r.signal_type,
-            # FIX: explicitly coerce to float or None — never let a DB
-            # Decimal type sneak through and crash JSON serialisation
-            "confidence":  float(r.confidence) if r.confidence is not None else None,
+            "confidence":  r.confidence,
             "regime":      r.regime,
             "channel":     r.channel,
             "subject":     r.subject,
@@ -492,6 +560,7 @@ def get_leaderboard(
     q = db.query(StrategyPerformance).filter(
         StrategyPerformance.sharpe_ratio.isnot(None)
     )
+    # By default only return SUFFICIENT data quality rows; pass all_qualities=true for full table
     if not all_qualities:
         q = q.filter(StrategyPerformance.data_quality == DataQuality.SUFFICIENT)
 

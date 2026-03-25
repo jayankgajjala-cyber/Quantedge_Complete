@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   Newspaper, Search, AlertTriangle, TrendingUp, TrendingDown,
@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useResearch, useNews, useInception } from "@/hooks/useData";
 import { getErrorMessage } from "@/lib/api";
-import { cn, sentimentColor, timeAgo } from "@/lib/utils";
+import { cn, sentimentColor, timeAgo, regimeBadge } from "@/lib/utils";
 import {
   Card, CardHeader, CardContent, Badge, Skeleton, Empty,
   ErrorBanner, LoadingOverlay,
@@ -61,10 +61,7 @@ export default function ResearchPage() {
     mutate: mutateRes,
   } = useResearch(ticker);
 
-  // FIX (News gate): useNews previously gated on `researchTicker === ticker`
-  // where researchTicker = research?.ticker. If research was loading or errored,
-  // researchTicker was undefined, so articles never loaded. Now the gate is
-  // managed in useData.ts and we just pass research?.ticker here.
+  // Only fetch articles after research for THIS ticker has loaded (prevents race condition)
   const {
     data: news,
     isLoading: newsLoading,
@@ -73,41 +70,13 @@ export default function ResearchPage() {
 
   const { data: inception } = useInception(ticker);
 
-  // ── FIX: Analyse button ────────────────────────────────────────────────────
-  // BEFORE: handleSearch set the ticker state and navigated. If the ticker was
-  // ALREADY the current ticker (user clicked Analyse for the same stock),
-  // React bailed out of the state update (same value) → no re-render →
-  // SWR never re-fetched → nothing happened. Clicking "Analyse" appeared broken.
-  //
-  // AFTER: always call mutateRes() to force a fresh fetch, regardless of whether
-  // the ticker changed. If it DID change, the state update + SWR key change
-  // handles it naturally. If it DIDN'T change, mutateRes() forces a re-fetch.
-  const handleSearch = useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      const t = input.trim().toUpperCase();
-      if (!t) return;
-
-      if (t === ticker) {
-        // Same ticker — force SWR to re-fetch (clears 60-min cache for this call)
-        mutateRes(undefined, { revalidate: true });
-      } else {
-        // Different ticker — update state (SWR key changes → automatic re-fetch)
-        setTicker(t);
-        router.push(`/research?ticker=${t}`, { scroll: false });
-      }
-    },
-    [input, ticker, mutateRes, router]
-  );
-
-  const selectTicker = useCallback(
-    (t: string) => {
-      setTicker(t);
-      setInput(t);
-      router.push(`/research?ticker=${t}`, { scroll: false });
-    },
-    [router]
-  );
+  function handleSearch(e: React.FormEvent) {
+    e.preventDefault();
+    const t = input.trim().toUpperCase();
+    if (!t) return;
+    setTicker(t);
+    router.push(`/research?ticker=${t}`, { scroll: false });
+  }
 
   const sentScore = research?.avg_sentiment_score ?? 0;
   const sentLabel = sentScore > 0.3 ? "Positive" : sentScore < -0.3 ? "Negative" : "Neutral";
@@ -123,12 +92,6 @@ export default function ResearchPage() {
             AI-powered sentiment · FinBERT + BART · 60-min cache
           </p>
         </div>
-        {/*
-          FIX: The Analyse button is now wired to handleSearch which:
-          1. Always fires mutateRes() to force re-fetch
-          2. Updates ticker state + navigates if ticker changed
-          Previously it only navigated — if same ticker, nothing happened.
-        */}
         <form onSubmit={handleSearch} className="flex gap-2">
           <div className="relative">
             <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -141,10 +104,8 @@ export default function ResearchPage() {
           </div>
           <button
             type="submit"
-            disabled={resLoading}
-            className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/20 transition-all disabled:opacity-60 flex items-center gap-1.5"
+            className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/20 transition-all"
           >
-            {resLoading ? <Loader2 size={11} className="animate-spin" /> : null}
             Analyse
           </button>
         </form>
@@ -155,7 +116,7 @@ export default function ResearchPage() {
         {NIFTY_50.map((t) => (
           <button
             key={t}
-            onClick={() => selectTicker(t)}
+            onClick={() => { setTicker(t); setInput(t); router.push(`/research?ticker=${t}`, { scroll: false }); }}
             className={cn(
               "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all",
               ticker === t
@@ -222,9 +183,8 @@ export default function ResearchPage() {
               </span>
               {research && (
                 <button
-                  onClick={() => mutateRes(undefined, { revalidate: true })}
+                  onClick={() => mutateRes()}
                   className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
-                  title="Force refresh analysis"
                 >
                   <RefreshCw size={11} />
                 </button>
@@ -310,7 +270,7 @@ export default function ResearchPage() {
                 title="No articles found"
                 description={resError
                   ? "Analysis failed — check backend connection"
-                  : "Click Analyse to fetch and analyse news for this ticker"}
+                  : "Analysis runs automatically when you search a ticker"}
               />
             ) : (
               <div className="space-y-2">

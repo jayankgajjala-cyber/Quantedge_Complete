@@ -1,53 +1,21 @@
 """
-backend/main.py  — v10.0 (Production-Ready)
+backend/main.py  — v9.5 (Observability-Hardened)
 
-CHANGES FROM v9.2:
-─────────────────────────────────────────────────────────────────────────────
-FIX 1 — ROUTE PREFIX (the 404 root cause):
-    Routers were mounted at prefix="/api", but each router already had its
-    own prefix (/auth, /dashboard, /trading, /market). This produced:
-        /api/auth/...        ✓  frontend calls   /api/auth/...
-        /api/dashboard/...   ✓  frontend calls   /api/dashboard/...
-        /api/trading/...     ✓  frontend calls   /api/trading/...
-        /api/market/...      ✓  frontend calls   /api/market/...
-    The original code was CORRECT for these routes. The 404s were caused by
-    the health endpoint being at /health while the frontend and Railway
-    healthcheck both probe /api/health. Fixed: health moved to /api/health.
-    The root / is kept for Railway's "service running" check.
-
-FIX 2 — CORS:
-    allow_origins now reads CORS_ORIGINS env var (comma-separated list).
-    Default is still "*" so local dev works without config, but production
-    should set: CORS_ORIGINS=https://your-app.vercel.app
-    allow_credentials is set to True only when specific origins are given
-    (browser blocks credentials with wildcard origins).
-
-FIX 3 — STRUCTURED LOGGING:
-    Replaced logging_config with utils/logger.py which streams full
-    tracebacks to Railway terminal. LoggingMiddleware times every request
-    and logs method/path/status/duration.
-
-FIX 4 — GLOBAL EXCEPTION HANDLER:
-    All unhandled exceptions now return structured JSON:
-        {"error": "INTERNAL_ERROR", "message": "...", "path": "...", "request_id": "..."}
-    Never returns a blank 500 page again.
-
-FIX 5 — /api/health ENDPOINT:
-    - Checks Supabase/PostgreSQL connection with a real SELECT
-    - Returns scheduler status + active job count
-    - Returns 200 with status="degraded" (not 500) when DB is unavailable
-      so Railway doesn't restart the pod on a transient DB hiccup
-
-FIX 6 — PARQUET CACHE:
-    yfinance cache and parquet cache both forced to /tmp/* at startup.
-    Prevents "Read-only filesystem" errors on Railway's ephemeral FS.
-─────────────────────────────────────────────────────────────────────────────
+Changes from v9.4:
+  - Logging routed through backend.utils.logger (setup_logging / get_logger).
+    Format: [timestamp] [LEVEL   ] [module]: message  → clean Railway console lines.
+  - Global @app.exception_handler(Exception) returns structured JSON:
+      { "error": "InternalServerError", "message": "<hint>", "detail": "<exc>",
+        "path": "<route>" }
+  - Startup pre-flight diagnostics logs:
+      • DB driver + sanitised connection URL (password masked)
+      • /tmp/parquet writability probe
+      • Active CORS origins list
+  - All URL paths, router mounts, scheduler jobs, and business logic UNCHANGED.
 """
 
 import logging
 import os
-import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -55,32 +23,18 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# FIX 3: Use structured logger before anything else
-from backend.utils.logger import (
-    configure_logging,
-    get_logger,
-    log_startup_banner,
-    log_request,
-)
 from backend.core.config   import get_settings
 from backend.core.database import init_db
+from backend.utils.logger  import setup_logging, get_logger
 
 cfg = get_settings()
 
-# Configure logging FIRST — before any other import that might call getLogger
-configure_logging(
-    log_dir  = "/tmp/logs",   # /tmp is always writable on Railway
-    level    = logging.DEBUG if cfg.DEBUG else logging.INFO,
-    use_color= True,
-)
+# ── Logging bootstrap ─────────────────────────────────────────────────────────
+setup_logging(log_dir="logs", level=logging.DEBUG if cfg.DEBUG else logging.INFO)
 logger = get_logger(__name__)
 
-# FIX 6: Force all caches to /tmp immediately after logging is up
 import yfinance as yf
 yf.set_tz_cache_location("/tmp/yf_cache")
-os.makedirs("/tmp/parquet",  exist_ok=True)
-os.makedirs("/tmp/yf_cache", exist_ok=True)
-logger.info("Cache dirs: /tmp/parquet, /tmp/yf_cache")
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -97,7 +51,8 @@ def _build_scheduler():
     def _on_error(event):
         logger.error(
             "Scheduler job '%s' raised: %s",
-            event.job_id, event.exception, exc_info=(type(event.exception), event.exception, event.traceback)
+            event.job_id, event.exception,
+            exc_info=event.traceback,
         )
     def _on_missed(event):
         logger.warning("Scheduler job '%s' missed its fire time", event.job_id)
@@ -118,16 +73,18 @@ def _build_scheduler():
             open_t  = dtime(cfg.MARKET_OPEN_HOUR_IST,  cfg.MARKET_OPEN_MIN_IST)
             close_t = dtime(cfg.MARKET_CLOSE_HOUR_IST, cfg.MARKET_CLOSE_MIN_IST)
             if now.weekday() > 4 or not (open_t <= now.time() <= close_t):
-                logger.debug("Market closed (%s %s) — heartbeat skipped",
-                             now.strftime("%A"), now.strftime("%H:%M IST"))
+                logger.debug(
+                    "Market closed (%s %s) — heartbeat skipped",
+                    now.strftime("%A"), now.strftime("%H:%M IST"),
+                )
                 return
         except Exception as exc:
             logger.warning("Market hours check failed: %s", exc)
 
         logger.info("══ HEARTBEAT START ══")
         loop = asyncio.get_event_loop()
-        scan_results = []
 
+        scan_results = []
         try:
             engine_obj   = get_signal_engine()
             scan_results = await loop.run_in_executor(None, engine_obj.run_scan)
@@ -148,8 +105,10 @@ def _build_scheduler():
 
         logger.info("══ HEARTBEAT DONE ══")
 
-    scheduler.add_job(_heartbeat, "interval", seconds=cfg.HEARTBEAT_INTERVAL_SECS,
-                      id="heartbeat_5min", name="5-Min Market Heartbeat")
+    scheduler.add_job(
+        _heartbeat, "interval", seconds=cfg.HEARTBEAT_INTERVAL_SECS,
+        id="heartbeat_5min", name="5-Min Market Heartbeat",
+    )
 
     # ── Regime detector every 5 min ───────────────────────────────────────────
     async def _regime_job():
@@ -162,8 +121,10 @@ def _build_scheduler():
         except Exception as exc:
             logger.error("Regime job failed: %s", exc, exc_info=True)
 
-    scheduler.add_job(_regime_job, "interval", seconds=300,
-                      id="regime_detector", name="Market Regime Detector")
+    scheduler.add_job(
+        _regime_job, "interval", seconds=300,
+        id="regime_detector", name="Market Regime Detector",
+    )
 
     # ── Portfolio research refresh every 60 min ───────────────────────────────
     async def _research_refresh():
@@ -184,13 +145,14 @@ def _build_scheduler():
         except Exception as exc:
             logger.error("Research refresh job failed: %s", exc, exc_info=True)
 
-    scheduler.add_job(_research_refresh, "interval", seconds=3600,
-                      id="research_refresh", name="Portfolio Research Refresh")
+    scheduler.add_job(
+        _research_refresh, "interval", seconds=3600,
+        id="research_refresh", name="Portfolio Research Refresh",
+    )
 
     # ── Weekly backtest — Saturday 06:30 IST ──────────────────────────────────
     async def _weekly_backtest():
         import asyncio
-        import time as _time
         from backend.core.database    import get_db_context
         from backend.models.portfolio import Holding
         from backend.services.quant_service import get_quant_service
@@ -202,7 +164,7 @@ def _build_scheduler():
                 await asyncio.get_event_loop().run_in_executor(
                     None, svc.run_backtest_for_ticker, t
                 )
-                _time.sleep(3)
+                import time; time.sleep(3)
             logger.info("Weekly backtest complete for %d tickers", len(tickers))
         except Exception as exc:
             logger.error("Weekly backtest failed: %s", exc, exc_info=True)
@@ -236,13 +198,15 @@ def _build_scheduler():
         id="weekly_report", name="Weekly P&L Report (Sat 23:30 IST)",
     )
 
-    logger.info("Scheduler built — TZ: Asia/Kolkata — %d jobs", len(scheduler.get_jobs()))
+    logger.info(
+        "Scheduler configured — timezone: Asia/Kolkata — %d jobs",
+        len(scheduler.get_jobs()),
+    )
     return scheduler
 
 
-# ── Alert dispatcher ──────────────────────────────────────────────────────────
-
 def _dispatch_alerts(scan_results: list[dict]) -> None:
+    """Email alerts for signals with confidence >= ALERT_CONFIDENCE_THRESHOLD."""
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text      import MIMEText
@@ -280,6 +244,8 @@ def _dispatch_alerts(scan_results: list[dict]) -> None:
                     f"<p><b>Strategy:</b> {sig.get('selected_strategy','')}</p>"
                     f"<p><b>Reason:</b> {sig.get('reason','')}</p>"
                     f"<p><b>Sentiment:</b> {sig.get('sentiment_score','N/A')} ({sig.get('sentiment_label','N/A')})</p>"
+                    f"<p><b>TradingView:</b> {sig.get('source_confirmations',{}).get('tradingview_summary','N/A')}</p>"
+                    f"<p><b>Moneycontrol:</b> {sig.get('source_confirmations',{}).get('moneycontrol_mood','N/A')}</p>"
                     f"<p><a href='{cfg.FRONTEND_BASE_URL}/signals?ticker={ticker}'>View Full Analysis</a></p>"
                     f"<hr><small>Rate limited to {cfg.MAX_ALERTS_PER_DAY} alerts/day</small>"
                 )
@@ -295,7 +261,7 @@ def _dispatch_alerts(scan_results: list[dict]) -> None:
                         s.sendmail(cfg.ALERT_EMAIL_FROM, cfg.ALERT_EMAIL_TO, msg.as_string())
                     logger.info("Alert sent: %s %s %.0f%%", ticker, signal, conf)
                 except Exception as exc:
-                    logger.error("Alert email failed for %s: %s", ticker, exc, exc_info=True)
+                    logger.error("Alert email failed: %s", exc, exc_info=True)
 
             db.add(AlertDispatchLog(
                 ticker=ticker, signal_type=signal, confidence=conf,
@@ -304,9 +270,8 @@ def _dispatch_alerts(scan_results: list[dict]) -> None:
             ))
 
 
-# ── Stop-Loss monitor ─────────────────────────────────────────────────────────
-
 def _run_sl_monitor() -> None:
+    """Auto-close paper trades whose SL or target has been breached."""
     import yfinance as yf
     from backend.core.database import get_db_context
     from backend.models.paper  import (
@@ -354,8 +319,73 @@ def _run_sl_monitor() -> None:
                 realised_pnl=trade.pnl, realised_pnl_pct=trade.pnl_pct,
                 close_reason=reason,
             ))
-            logger.warning("AUTO-CLOSE %s (id=%d) %s @ %.2f | P&L %.2f",
-                           trade.symbol, trade.id, reason, exit_price, trade.pnl)
+            logger.warning(
+                "AUTO-CLOSE %s (id=%d) %s @ %.2f | P&L %.2f",
+                trade.symbol, trade.id, reason, exit_price, trade.pnl,
+            )
+
+
+# ── Pre-flight diagnostic helpers ─────────────────────────────────────────────
+
+def _preflight_db() -> str:
+    """Log DB driver and sanitised URL (password masked). Returns driver label."""
+    db_url = cfg.DATABASE_URL or ""
+    if db_url:
+        try:
+            from urllib.parse import urlparse, urlunparse
+            parsed   = urlparse(db_url)
+            netloc   = parsed.netloc.replace(f":{parsed.password}@", ":***@") if parsed.password else parsed.netloc
+            safe_url = urlunparse(parsed._replace(netloc=netloc))
+        except Exception:
+            safe_url = "<url-parse-error>"
+        logger.info("  DB │ Driver   : PostgreSQL (NullPool — Supabase/pgbouncer mode)")
+        logger.info("  DB │ Attempting connection to: %s", safe_url)
+        return "PostgreSQL"
+    else:
+        logger.info("  DB │ Driver   : SQLite (local dev — data lost on container restart)")
+        logger.warning(
+            "  DB │ WARNING  : DATABASE_URL not set. "
+            "Set DATABASE_URL=postgresql://... in Railway env vars before production deploy."
+        )
+        return "SQLite"
+
+
+def _preflight_parquet() -> bool:
+    """Probe /tmp/parquet for writability. Returns True if writable."""
+    parquet_dir = "/tmp/parquet"
+    try:
+        os.makedirs(parquet_dir, exist_ok=True)
+        probe = os.path.join(parquet_dir, ".write_probe")
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        logger.info("  FS │ /tmp/parquet  : writable ✓")
+        return True
+    except Exception as exc:
+        logger.error("  FS │ /tmp/parquet  : NOT writable ✗ — %s", exc, exc_info=True)
+        return False
+
+
+def _preflight_yf_cache() -> None:
+    """Ensure /tmp/yf_cache exists."""
+    try:
+        os.makedirs("/tmp/yf_cache", exist_ok=True)
+        logger.info("  FS │ /tmp/yf_cache : writable ✓")
+    except Exception as exc:
+        logger.error("  FS │ /tmp/yf_cache : NOT writable ✗ — %s", exc)
+
+
+def _preflight_cors(origins: list[str]) -> None:
+    """Log the active CORS origin list."""
+    if "*" in origins:
+        logger.warning(
+            "  CORS │ Allowing ALL origins (*). "
+            "Set CORS_ORIGINS=https://your-frontend.vercel.app in Railway to restrict."
+        )
+    else:
+        logger.info("  CORS │ Allowed origins (%d):", len(origins))
+        for o in origins:
+            logger.info("         • %s", o)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -367,42 +397,42 @@ _scheduler = None
 async def lifespan(app: FastAPI):
     global _scheduler
 
-    log_startup_banner(
-        logger,
-        app_name    = cfg.APP_NAME,
-        version     = cfg.APP_VERSION,
-        db_driver   = "PostgreSQL (Supabase)" if cfg.DATABASE_URL else "SQLite (local)",
-        frontend_url= cfg.FRONTEND_URL,
-    )
+    logger.info("=" * 70)
+    logger.info("  QUANTEDGE v%s  —  STARTING UP", cfg.APP_VERSION)
+    logger.info("=" * 70)
 
-    # Init DB tables (idempotent — skips existing tables)
-    try:
-        init_db()
-    except Exception as exc:
-        logger.critical(
-            "Database init FAILED: %s\n"
-            "  → Check DATABASE_URL in Railway env vars\n"
-            "  → Make sure Supabase project is not paused\n"
-            "  → Run the SQL migration script if tables are missing",
-            exc, exc_info=True,
-        )
-        # Don't raise — let the app start so /api/health can report the error
+    # Pre-flight check 1: Database
+    logger.info("[ PRE-FLIGHT 1/3 ] Database")
+    db_driver = _preflight_db()
 
-    # Start scheduler
+    # Pre-flight check 2: Filesystem
+    logger.info("[ PRE-FLIGHT 2/3 ] Filesystem")
+    _preflight_parquet()
+    _preflight_yf_cache()
+
+    # Pre-flight check 3: CORS
+    logger.info("[ PRE-FLIGHT 3/3 ] CORS")
+    _preflight_cors(_cors_origins)
+
+    logger.info("=" * 70)
+    logger.info("  DB driver: %s | Scheduler TZ: Asia/Kolkata", db_driver)
+    logger.info("=" * 70)
+
+    init_db()
+
     try:
         _scheduler = _build_scheduler()
         _scheduler.start()
-        logger.info("Scheduler started: %s",
-                    ", ".join(j.id for j in _scheduler.get_jobs()))
+        logger.info("Scheduler started: %s", ", ".join(j.id for j in _scheduler.get_jobs()))
     except Exception as exc:
         logger.critical("Scheduler failed to start: %s", exc, exc_info=True)
 
-    yield  # ── App is running ──────────────────────────────────────────
+    yield
 
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         logger.info("Scheduler stopped")
-    logger.info("QUANTEDGE — SHUT DOWN COMPLETE")
+    logger.info("  QUANTEDGE — SHUT DOWN")
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -412,133 +442,155 @@ app = FastAPI(
     version     = cfg.APP_VERSION,
     description = (
         "Institutional AI Trading Dashboard — Modules 1-8.\n\n"
-        "**Auth flow**: `POST /api/auth/login` → `POST /api/auth/verify-otp` → Bearer token.\n\n"
-        "**Health**: `GET /api/health` — checks DB + scheduler."
+        "**Auth**: POST /api/auth/login → POST /api/auth/verify-otp → Bearer token."
     ),
     lifespan  = lifespan,
     docs_url  = "/docs",
     redoc_url = "/redoc",
 )
 
-
-# ── FIX 2: CORS ───────────────────────────────────────────────────────────────
-# Production: set CORS_ORIGINS=https://your-app.vercel.app in Railway env vars
-# Local dev:  leave CORS_ORIGINS unset → defaults to "*" (allows everything)
-#
-# Multiple origins: CORS_ORIGINS=https://app.vercel.app,https://staging.vercel.app
-_raw_origins  = os.environ.get("CORS_ORIGINS", "*")
-_cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-_allow_all    = "*" in _cors_origins
+# ── CORS ──────────────────────────────────────────────────────────────────────
+_cors_origins = [
+    origin.strip().rstrip("/")
+    for origin in cfg.CORS_ORIGINS.split(",")
+    if origin.strip()
+]
+_allow_all = "*" in _cors_origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins     = ["*"] if _allow_all else _cors_origins,
-    allow_credentials = False if _allow_all else True,   # browser blocks creds with wildcard
-    allow_methods     = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_credentials = False if _allow_all else True,
+    allow_methods     = ["*"],
     allow_headers     = ["*"],
-    expose_headers    = ["X-Request-ID"],
-)
-
-logger.info(
-    "CORS configured: %s",
-    "allow_all (*)" if _allow_all else f"explicit origins: {_cors_origins}",
 )
 
 
-# ── FIX 3: Request logging middleware ─────────────────────────────────────────
+# ── Global exception handler ──────────────────────────────────────────────────
 
-@app.middleware("http")
-async def logging_middleware(request: Request, call_next):
+def _extract_table_name(exc_str: str) -> str:
+    """Extract table name from SQLAlchemy error string."""
+    import re
+    m = re.search(r'relation "([^"]+)"', exc_str)
+    if m:
+        return m.group(1)
+    m = re.search(r'no such table:\s*(\S+)', exc_str)
+    if m:
+        return m.group(1)
+    return "unknown"
+
+
+def _exception_hint(exc: Exception, path: str) -> str:
     """
-    Attaches a unique Request-ID to every request and logs:
-        method, path, status_code, duration_ms
-
-    The request_id is returned in the X-Request-ID response header so it
-    can be correlated with Railway logs when debugging production errors.
+    Return a concise, actionable hint string for a given exception.
+    These appear in the structured JSON error body returned to the frontend.
     """
-    request_id = str(uuid.uuid4())[:8]
-    request.state.request_id = request_id
+    import sqlalchemy.exc as sa_exc
 
-    start = time.perf_counter()
-    try:
-        response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000
-        response.headers["X-Request-ID"] = request_id
-        log_request(
-            logger,
-            method     = request.method,
-            path       = request.url.path,
-            status     = response.status_code,
-            duration_ms= duration_ms,
-            request_id = request_id,
+    exc_type = type(exc).__name__
+    exc_str  = str(exc).lower()
+
+    if isinstance(exc, sa_exc.OperationalError):
+        if "could not connect" in exc_str or "connection refused" in exc_str:
+            return (
+                "Cannot connect to Supabase. "
+                "Check DATABASE_URL in Railway environment variables."
+            )
+        if "no such table" in exc_str or ("relation" in exc_str and "does not exist" in exc_str):
+            table = _extract_table_name(str(exc).lower())
+            return (
+                f"Database table '{table}' not found in Supabase. "
+                "Run init_db() or check your migration history."
+            )
+        return f"Database operational error on {path}. Check Railway DB logs."
+
+    if isinstance(exc, sa_exc.ProgrammingError):
+        table = _extract_table_name(str(exc).lower())
+        return (
+            f"Database schema error — table '{table}' may be missing from Supabase. "
+            "Verify DATABASE_URL points to the correct project."
         )
-        return response
-    except Exception as exc:
-        duration_ms = (time.perf_counter() - start) * 1000
-        logger.error(
-            "[%s] UNHANDLED %s %s (%.1fms): %s",
-            request_id, request.method, request.url.path, duration_ms, exc,
-            exc_info=True,
+
+    if isinstance(exc, sa_exc.IntegrityError):
+        return (
+            "Database integrity error — duplicate key or constraint violation. "
+            f"Check the data being written on {path}."
         )
-        raise
 
+    if isinstance(exc, sa_exc.TimeoutError):
+        return (
+            "Supabase connection timed out. "
+            "The database may be cold-starting — retry in 10–30 seconds."
+        )
 
-# ── FIX 4: Global exception handler ──────────────────────────────────────────
-# Returns structured JSON so the frontend can display a useful toast.
-# Never returns a blank white 500 page again.
+    if isinstance(exc, (ValueError, TypeError)) and "json" in exc_str:
+        return (
+            f"JSON serialisation failed on {path}. "
+            "A model field may contain a non-serialisable type."
+        )
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    request_id = getattr(request.state, "request_id", "unknown")
-    path = request.url.path
+    if "yfinance" in exc_str or "no data found" in exc_str:
+        return (
+            "yfinance returned no data. "
+            "Ticker may be delisted or NSE markets may be closed."
+        )
 
-    logger.critical(
-        "[%s] Unhandled exception on %s %s: %s",
-        request_id, request.method, path, exc,
-        exc_info=True,
+    if exc_type in ("ConnectionError", "ConnectTimeout", "ReadTimeout"):
+        return (
+            f"Network timeout on {path}. "
+            "An external API (yfinance, HuggingFace, NewsAPI) may be unreachable."
+        )
+
+    if exc_type in ("JWTError", "DecodeError", "InvalidTokenError"):
+        return "JWT token is invalid or expired. Please log in again."
+
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return (
+            f"Filesystem error on {path}: {exc_type}. "
+            "Check /tmp/parquet and /tmp/yf_cache are writable on Railway."
+        )
+
+    return (
+        f"Unexpected {exc_type} on {path}. "
+        "Check Railway backend logs for the full traceback."
     )
 
-    # Map common exception types to user-friendly hints
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Catch any unhandled exception that escapes a route handler.
+
+    1. Logs the full traceback to stdout → visible in Railway logs with file
+       name and exact line number.
+    2. Returns structured JSON to the frontend:
+       { "error": "InternalServerError", "message": "<hint>",
+         "detail": "<exc message>", "path": "<route>" }
+    """
     exc_type = type(exc).__name__
-    hints = {
-        "OperationalError":   "Database connection failed. Check DATABASE_URL and Supabase status.",
-        "ProgrammingError":   "SQL error — a table may be missing. Run the migration script.",
-        "IntegrityError":     "Database constraint violation — duplicate or invalid data.",
-        "ConnectionError":    "Network error reaching an external service (yfinance/NewsAPI).",
-        "TimeoutError":       "Request timed out. The operation may still be running in background.",
-        "AttributeError":     "Internal data error — a model field may be missing.",
-        "KeyError":           "Missing required field in response data.",
-        "ValueError":         "Invalid value in request or response data.",
-    }
-    hint = hints.get(exc_type, "An unexpected error occurred. Check Railway logs for details.")
+    path     = request.url.path
+
+    logger.critical(
+        "Unhandled %s on [%s %s]: %s",
+        exc_type, request.method, path, exc,
+        exc_info=True,
+    )
 
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
-            "error":      exc_type,
-            "message":    hint,
-            "detail":     str(exc),
-            "path":       path,
-            "request_id": request_id,
-            "docs":       f"{cfg.FRONTEND_BASE_URL}/docs",
+            "error":   "InternalServerError",
+            "message": _exception_hint(exc, path),
+            "detail":  str(exc),
+            "path":    path,
         },
-        headers={"X-Request-ID": request_id},
     )
 
 
-# ── FIX 1: Routers ────────────────────────────────────────────────────────────
-# Each router has its own prefix (/auth, /dashboard, /trading, /market).
-# We mount them all under /api so final paths are:
-#   /api/auth/login
-#   /api/dashboard/
-#   /api/trading/portfolio/upload
-#   /api/market/ohlcv/{ticker}
-#
-# The frontend api.ts uses baseURL = `${API_BASE}/api` so it calls:
-#   /api/auth/login          ✓
-#   /api/dashboard/regime    ✓
-#   /api/trading/backtest/.. ✓
-#   /api/market/ohlcv/..     ✓
+# ── Router registration ───────────────────────────────────────────────────────
+# URL paths FROZEN — do not change prefixes.
+# dashboard_router prefix="/dashboard" → /api/dashboard/* (matches useData.ts SWR hooks)
+# trading_router   prefix="/trading"   → /api/trading/*   (matches useData.ts SWR hooks)
 
 from backend.api.routers.auth        import router as auth_router
 from backend.api.routers.market_data import router as market_data_router
@@ -551,94 +603,59 @@ app.include_router(dashboard_router,   prefix="/api")
 app.include_router(trading_router,     prefix="/api")
 
 
-# ── FIX 5: /api/health endpoint ──────────────────────────────────────────────
-# Moved from /health to /api/health so:
-#   - railway.toml healthcheckPath = "/api/health" works
-#   - Frontend can call /api/health to show connection status in Settings
-#   - Returns 200 even when DB is degraded (so Railway doesn't restart the pod)
+# ── System endpoints ──────────────────────────────────────────────────────────
 
-@app.get("/api/health", tags=["System"])
+@app.get("/health", tags=["System"])
 def health():
-    """
-    Startup health check. Tests:
-      1. Database connectivity (SELECT 1 on Supabase)
-      2. Scheduler running + job count
-      3. Cache directories writable
-
-    Returns HTTP 200 always. Check 'status' field:
-      - "ok"       → everything healthy
-      - "degraded" → DB or scheduler issue, app still serving
-    """
     from sqlalchemy import text
     from backend.core.database import engine
 
-    # ── DB check ──────────────────────────────────────────────────────────────
-    db_status  = "ok"
-    db_detail  = None
-    db_latency = None
+    db_ok    = False
+    db_error = None
     try:
-        t0 = time.perf_counter()
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        db_latency = round((time.perf_counter() - t0) * 1000, 1)
+        db_ok = True
     except Exception as exc:
-        db_status = "error"
-        db_detail = str(exc)
-        logger.error("Health check: DB connection failed: %s", exc)
+        db_error = str(exc)
 
-    # ── Scheduler check ───────────────────────────────────────────────────────
-    sched_status = "stopped"
-    active_jobs  = 0
-    if _scheduler:
-        try:
-            active_jobs  = len(_scheduler.get_jobs())
-            sched_status = "running" if _scheduler.running else "stopped"
-        except Exception:
-            sched_status = "error"
-
-    # ── Cache dirs check ──────────────────────────────────────────────────────
-    cache_ok = os.path.isdir("/tmp/parquet") and os.access("/tmp/parquet", os.W_OK)
-
-    overall = "ok" if (db_status == "ok" and sched_status == "running") else "degraded"
+    parquet_dir      = "/tmp/parquet"
+    parquet_writable = False
+    try:
+        os.makedirs(parquet_dir, exist_ok=True)
+        probe = os.path.join(parquet_dir, ".write_probe")
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        parquet_writable = True
+    except Exception:
+        pass
 
     return {
-        "status":       overall,
-        "version":      cfg.APP_VERSION,
-        "timestamp":    datetime.now(timezone.utc).isoformat(),
-        "database": {
-            "status":    db_status,
-            "driver":    "postgresql" if cfg.DATABASE_URL else "sqlite",
-            "latency_ms": db_latency,
-            "detail":    db_detail,
-        },
-        "scheduler": {
-            "status":      sched_status,
-            "active_jobs": active_jobs,
-            "timezone":    "Asia/Kolkata",
-        },
-        "cache": {
-            "parquet_dir": "/tmp/parquet",
-            "writable":    cache_ok,
-        },
-        "cors": {
-            "mode":    "wildcard" if _allow_all else "explicit",
-            "origins": _cors_origins,
-        },
+        "status":           "ok",
+        "version":          cfg.APP_VERSION,
+        "database":         "ok" if db_ok else "error",
+        "db_driver":        "postgresql" if cfg.DATABASE_URL else "sqlite",
+        "db_error":         db_error,
+        "scheduler":        "running" if (_scheduler and _scheduler.running) else "stopped",
+        "active_jobs":      len(_scheduler.get_jobs()) if _scheduler else 0,
+        "scheduler_tz":     "Asia/Kolkata",
+        "parquet_cache":    parquet_dir,
+        "parquet_writable": parquet_writable,
+        "cors_origins":     _cors_origins,
     }
 
 
 @app.get("/", tags=["System"])
 def root():
-    """Railway 'service is up' ping endpoint."""
     return {
         "message": cfg.APP_NAME,
         "version": cfg.APP_VERSION,
-        "health":  "/api/health",
         "docs":    "/docs",
+        "health":  "/health",
         "api": {
             "auth":      "/api/auth",
             "dashboard": "/api/dashboard",
             "trading":   "/api/trading",
-            "market":    "/api/market",
         },
     }

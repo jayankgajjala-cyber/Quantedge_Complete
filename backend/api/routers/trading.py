@@ -3,19 +3,6 @@ backend/api/routers/trading.py
 ================================
 All trading data endpoints — all JWT-protected.
 
-FIX 1: list_holdings() previously returned TWO different shapes:
-        - When empty:    {"status": "success", "data": [], "message": "..."}
-        - When has data: [{...}, {...}]  (raw array)
-        The frontend SWR hook expected a consistent array. When empty, the
-        wrapped object landed in `holdings` state — causing .reduce(), .filter(),
-        .length and .map() to crash or return NaN.
-        Fixed: always returns a plain array. Empty = []. Message shown via
-        a separate "empty_message" field the UI can optionally display.
-
-FIX 2: handleBacktest in Settings called api.get("/trading/portfolio/holdings")
-        and read `data.holdings` — but the response was already the array
-        (not a wrapper). Fixed by ensuring consistent shape here.
-
 Every endpoint:
   - Wraps logic in try/except
   - Returns structured errors: { "status": "error", "message": "..." }
@@ -39,6 +26,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+import sqlalchemy.exc as sa_exc
 import yfinance as yf
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -55,8 +43,9 @@ from backend.models.paper     import (
 )
 from backend.models.portfolio import DataQuality, Holding
 from backend.services.quant_service import get_quant_service, fetch_with_cache
+from backend.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 cfg    = get_settings()
 router = APIRouter(
     prefix="/trading",
@@ -164,25 +153,10 @@ async def upload_portfolio(
 
 @router.get("/portfolio/holdings", summary="List all holdings with live P&L")
 def list_holdings(db: Session = Depends(get_db)):
-    """
-    FIX 1: Always returns a plain JSON array (never a wrapped object).
-
-    Before this fix the endpoint returned two different shapes:
-      - Empty:    {"status": "success", "data": [], "message": "..."}
-      - Non-empty: [{symbol, quantity, ...}, ...]
-    The SWR `fetcher` in useData.ts returns `r.data` (the full response body).
-    When the portfolio was empty, `holdings` in React became the wrapper dict,
-    causing `.reduce()`, `.filter()`, `.length`, `.map()` to crash or return NaN.
-
-    Fix: always return `list[HoldingDict]`. Empty portfolio = `[]`.
-    The UI already handles the empty state with its own "No holdings yet" empty state.
-    """
     try:
         holdings = db.query(Holding).order_by(Holding.symbol).all()
-
-        # Always return array — empty list for no holdings
         if not holdings:
-            return []
+            return {"status": "success", "data": [], "message": "No holdings yet. Upload a Zerodha CSV to get started."}
 
         live_prices = _batch_live_prices([h.symbol for h in holdings])
 
@@ -207,9 +181,28 @@ def list_holdings(db: Session = Depends(get_db)):
                 "uploaded_at":   (h.updated_at.isoformat() if getattr(h, "updated_at", None) else None),
             })
         return result
+
+    except sa_exc.OperationalError as exc:
+        logger.error("list_holdings DB connection error: %s", exc, exc_info=True)
+        raise HTTPException(
+            503,
+            detail=(
+                "Cannot connect to the database to load holdings. "
+                "Check DATABASE_URL in Railway environment variables."
+            ),
+        )
+    except sa_exc.ProgrammingError as exc:
+        logger.error("list_holdings schema error: %s", exc, exc_info=True)
+        raise HTTPException(
+            500,
+            detail=(
+                "Database table 'holdings' not found in Supabase. "
+                "Verify DATABASE_URL points to the correct Supabase project."
+            ),
+        )
     except Exception as exc:
         logger.error("list_holdings failed: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Failed to load holdings: {exc}")
+        raise HTTPException(500, detail=f"Failed to load holdings: {exc}")
 
 
 # ─── Budget helpers ───────────────────────────────────────────────────────────
@@ -280,13 +273,13 @@ def open_paper_trade(payload: OpenTradeIn, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(trade)
         return {
-            "status":       "success",
-            "id":           trade.id,
-            "symbol":       trade.symbol,
+            "status":      "success",
+            "id":          trade.id,
+            "symbol":      trade.symbol,
             "status_trade": trade.status.value,
-            "entry_price":  trade.entry_price,
-            "quantity":     trade.quantity,
-            "message":      f"Paper trade #{trade.id} opened: {trade.direction.value} {trade.quantity} {trade.symbol} @ ₹{trade.entry_price}",
+            "entry_price": trade.entry_price,
+            "quantity":    trade.quantity,
+            "message":     f"Paper trade #{trade.id} opened: {trade.direction.value} {trade.quantity} {trade.symbol} @ ₹{trade.entry_price}",
         }
     except Exception as exc:
         logger.error("open_paper_trade failed: %s", exc, exc_info=True)
@@ -481,15 +474,15 @@ def allocate(payload: AllocateIn, db: Session = Depends(get_db)):
         ))
         db.commit()
         return {
-            "status":                 "success",
-            "can_allocate":           True,
-            "ticker":                 payload.ticker.upper(),
-            "current_price":          price,
-            "suggested_quantity":     quantity,
-            "actual_cost":            round(actual_cost, 2),
-            "allocation_pct":         round(max_alloc / cfg.MONTHLY_BUDGET_INR * 100, 2),
-            "commission":             round(commission, 2),
-            "risk_per_trade":         round(risk_per_trade, 2) if risk_per_trade else None,
+            "status":                "success",
+            "can_allocate":          True,
+            "ticker":                payload.ticker.upper(),
+            "current_price":         price,
+            "suggested_quantity":    quantity,
+            "actual_cost":           round(actual_cost, 2),
+            "allocation_pct":        round(max_alloc / cfg.MONTHLY_BUDGET_INR * 100, 2),
+            "commission":            round(commission, 2),
+            "risk_per_trade":        round(risk_per_trade, 2) if risk_per_trade else None,
             "budget_remaining_after": round(remaining - actual_cost, 2),
         }
     except Exception as exc:

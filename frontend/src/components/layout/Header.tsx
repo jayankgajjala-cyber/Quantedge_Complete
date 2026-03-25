@@ -13,25 +13,18 @@ const NIFTY_POPULAR = [
   "BAJFINANCE","MARUTI","TATAMOTORS","HCLTECH","SUNPHARMA",
 ];
 
-// ── Notification meta helper ──────────────────────────────────────────────────
-// FIX: `n.confidence` can be null (AlertDispatchLog.confidence is nullable).
-// The original code called `n.confidence.toFixed(0)` unconditionally, which
-// threw "Cannot read properties of null (reading 'toFixed')" and crashed the
-// entire notification dropdown render whenever any alert had no confidence value.
+// Derive a display type from signal_type string coming from alert_dispatch_log
 function notifMeta(n: Notification): {
   icon: React.ElementType;
   color: string;
   text: string;
 } {
   const sig = (n.signal_type || "").toUpperCase();
-  // Safe confidence display — null → empty string
-  const confStr = n.confidence != null ? ` — ${n.confidence.toFixed(0)}%` : "";
-
   if (sig === "BUY" || sig === "SELL") {
     return {
       icon:  TrendingUp,
       color: sig === "BUY" ? "text-bull" : "text-bear",
-      text:  n.subject || `${n.ticker} ${sig}${confStr}`,
+      text:  n.subject || `${n.ticker} ${sig} — ${n.confidence ? n.confidence.toFixed(0) + "%" : ""}`,
     };
   }
   if (sig === "SL_HIT" || sig === "TARGET_HIT") {
@@ -73,8 +66,6 @@ export default function Header() {
     router.push(`/research?ticker=${ticker.toUpperCase()}`);
   }, [router]);
 
-  // ── Scan Now ────────────────────────────────────────────────────────────────
-  // triggerScanNow() now uses apiSlow (120s) so this won't timeout prematurely.
   async function handleScan() {
     setScanning(true);
     try {
@@ -150,7 +141,7 @@ export default function Header() {
                 <button onClick={() => navigate(query.toUpperCase())}
                   className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-muted/50 transition-colors text-xs text-muted-foreground">
                   <Search size={12} />
-                  Analyse &quot;{query.toUpperCase()}&quot;
+                  Analyse "{query.toUpperCase()}"
                 </button>
               )}
             </div>

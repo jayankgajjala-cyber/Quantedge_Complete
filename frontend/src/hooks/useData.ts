@@ -1,23 +1,9 @@
 /**
  * useData.ts — SWR hooks + imperative async helpers
  *
- * FIX 1: triggerScanNow() now uses `apiSlow` (120s timeout) instead of `api`
- *         (30s timeout). The scan-now endpoint runs regime detection (~20s)
- *         + full signal scan (~30-60s). With the 30s client it ALWAYS timed
- *         out before completing — the frontend showed "Scan failed (timeout)"
- *         even when the backend finished successfully 10s later.
- *
- * FIX 2: useOHLCV fetcher now propagates errors correctly. Previously,
- *         when the backend returned 404, `r.data.bars` was `undefined`
- *         and SWR treated it as a successful empty result instead of an error.
- *         The fetcher now throws on missing `bars` field so SWR can surface
- *         the error to the UI via the `error` field.
- *
- * FIX 3: useNews() gate logic relaxed — previously `researchTicker === ticker`
- *         prevented articles loading after any error or re-render race. Now
- *         it only gates on `research` being truthy (loaded at all), not
- *         requiring the ticker field to match (which could mismatch on fast
- *         ticker switches if the backend normalises casing differently).
+ * SWR hooks surface { data, error, isLoading, mutate } for every endpoint.
+ * The `error` field lets pages render inline ErrorBanner instead of silent empties.
+ * Imperative helpers (triggerScanNow, runBacktest) are used by buttons.
  */
 import useSWR from "swr";
 import { fetcher, api, apiSlow } from "@/lib/api";
@@ -84,16 +70,10 @@ export function useResearch(ticker: string | null) {
 }
 
 // ── News Articles ─────────────────────────────────────────────────────────────
-// FIX 3: Gate loosened — previously `researchTicker === ticker` caused articles
-// to never load after a research error or fast ticker switch. Now we just check
-// that research has been attempted (research !== undefined) OR has loaded for
-// this ticker. This ensures articles load as soon as research is done.
+// Gated on researchTicker === ticker so articles aren't fetched before
+// NewsService.analyse() has run for the current ticker.
 export function useNews(ticker: string | null, researchTicker?: string | null) {
-  // Allow fetch when:
-  //   (a) research has loaded and ticker matches (happy path), OR
-  //   (b) researchTicker is explicitly provided and matches (legacy callers)
-  // Block only when ticker is null (no ticker selected yet)
-  const ready = !!ticker && (researchTicker === ticker || researchTicker != null);
+  const ready = ticker && researchTicker === ticker;
   return useSWR<NewsArticle[]>(
     ready ? `/dashboard/research/${ticker}/articles` : null,
     fetcher,
@@ -125,24 +105,10 @@ export function useBudget() {
 }
 
 // ── OHLCV ─────────────────────────────────────────────────────────────────────
-// FIX 2: The original fetcher did `api.get(url).then((r) => r.data.bars)`.
-// When the backend returned a 404 (no data for ticker), `r.data.bars` was
-// `undefined` and SWR set data=undefined with NO error — the component saw
-// isLoading=false, data=undefined, error=undefined and rendered nothing.
-// Fixed: throw when bars is missing so SWR captures it as `error`.
 export function useOHLCV(ticker: string | null, limit = 500) {
   return useSWR<OHLCVBar[]>(
     ticker ? `/market/ohlcv/${ticker}?limit=${limit}` : null,
-    async (url: string) => {
-      const r = await api.get(url);
-      const bars = r.data?.bars;
-      if (!Array.isArray(bars)) {
-        throw new Error(
-          r.data?.detail ?? `No OHLCV data for ${ticker} (quality: ${r.data?.quality ?? "unknown"})`
-        );
-      }
-      return bars as OHLCVBar[];
-    },
+    (url: string) => api.get(url).then((r) => r.data.bars),
     { refreshInterval: REFRESH_5M }
   );
 }
@@ -171,14 +137,9 @@ export function useNotifications() {
  * Phase 1: detect_and_persist() fresh regime
  * Phase 2: run full signal scan
  * Returns { signals_count, regime_label, regime_summary }
- *
- * FIX 1: Uses apiSlow (120s timeout) — not api (30s).
- * The backend runs: regime detection (~20s) + signal scan (~30-60s) = up to 80s.
- * With the old 30s client this ALWAYS timed out on cold runs, showing
- * "Scan failed" in the toast even when backend completed successfully.
  */
 export async function triggerScanNow() {
-  const { data } = await apiSlow.post("/dashboard/scan-now");
+  const { data } = await api.post("/dashboard/scan-now");
   return data;
 }
 

@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────────
     # Set DATABASE_URL to a PostgreSQL URL for production.
     # Blank = SQLite at DB_PATH (fine for local dev, data lost on container restart).
-    DATABASE_URL: Optional[str] = None
+    # Explicitly mapped to DATABASE_URL env var; defaults to None so main.py
+    # can correctly detect whether to use the PostgreSQL or SQLite driver.
+    DATABASE_URL: Optional[str] = None  # env: DATABASE_URL
     DB_PATH:      str           = "data/db/quantedge.db"
 
     # ── Parquet cache ─────────────────────────────────────────────────────────
@@ -119,6 +121,8 @@ class Settings(BaseSettings):
     # ── CORS / Frontend ───────────────────────────────────────────────────────
     # Default "*" means the app works immediately without any env var setup.
     # Restrict in production by setting CORS_ORIGINS=https://your-frontend.vercel.app
+    # Multiple origins: CORS_ORIGINS=https://app1.vercel.app,https://app2.vercel.app
+    CORS_ORIGINS:      str = "*"
     FRONTEND_URL:      str = "http://localhost:3000"
     FRONTEND_BASE_URL: str = "http://localhost:3000"
 

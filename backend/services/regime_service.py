@@ -18,6 +18,7 @@ Parquet caching:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -128,6 +129,10 @@ class RegimeService:
 
     def __init__(self, symbol: str = NIFTY_SYMBOL):
         self.symbol = symbol
+        # Ensure the parquet cache directory exists before any read/write attempt.
+        # Uses cfg.PARQUET_CACHE_DIR which defaults to /tmp/parquet (writable on
+        # Render/Railway/Fly/Docker without any additional configuration).
+        os.makedirs(cfg.PARQUET_CACHE_DIR, exist_ok=True)
 
     def _fetch_data(self) -> Optional[pd.DataFrame]:
         # Try parquet cache first

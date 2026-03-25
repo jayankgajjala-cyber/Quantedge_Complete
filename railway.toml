@@ -1,4 +1,6 @@
 # Railway deployment configuration
+# $PORT must NOT be in startCommand — Railway does not shell-expand
+# variables in TOML strings. Use a startup script instead.
 
 [build]
 builder = "NIXPACKS"
@@ -7,5 +9,5 @@ builder = "NIXPACKS"
 startCommand = "sh start.sh"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-healthcheckPath = "/api/health"
+healthcheckPath = "/health"
 healthcheckTimeout = 30

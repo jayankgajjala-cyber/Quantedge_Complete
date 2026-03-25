@@ -1,96 +1,71 @@
-# ═══════════════════════════════════════════════════════════════════════════
-#  Quantedge Trading System — Requirements v10.0
+# ═══════════════════════════════════════════════════════════════════
+#  Quantedge Trading System — Requirements v9.4
 #  Python 3.11 (matches Dockerfile: FROM python:3.11-slim)
-#  Target: Railway (Linux/amd64) + Supabase PostgreSQL
 #
-#  KEY PINS & REASONS:
-#  ─────────────────────────────────────────────────────────────────────────
-#  bcrypt==4.0.1         bcrypt 4.x dropped __about__; passlib 1.7.4 reads
-#                        it at import → AttributeError crash on startup.
-#                        FIXED in passlib 1.7.4 via try/except in newer pip
-#                        installs, but pin bcrypt<4.1 to stay safe.
+#  KEY PINS & REASONS
+#  ──────────────────
+#  bcrypt==3.2.2        passlib 1.7.4 reads bcrypt.__about__ at import
+#                       time; bcrypt>=4.0 removed that attr → AttributeError
+#                       at startup. MUST stay at 3.x until passlib is replaced.
 #
-#  numpy==1.26.4         numpy 2.x has breaking C-API changes that break
-#                        scipy, scikit-learn, and pyarrow on first import.
-#                        Stay on 1.26.x until all three upstream packages
-#                        publish numpy-2-compatible wheels for linux/amd64.
+#  apscheduler==3.10.4  APScheduler 4.x is a full rewrite with breaking API.
+#                       AsyncIOScheduler, add_job, add_listener are 3.x APIs.
+#                       Do NOT upgrade to 4.x without a full scheduler rewrite.
 #
-#  psycopg2-binary       Use the binary wheel (not psycopg2) — it bundles
-#                        libpq so no system libpq-dev is needed at runtime.
-#                        Required for Supabase/Railway PostgreSQL.
+#  pydantic==2.7.1      models/schemas.py uses @validator (v1 compat API).
+#                       Pydantic v2 still supports it but emits DeprecationWarning.
+#                       Safe to keep; migrate @validator → @field_validator when ready.
 #
-#  pydantic==2.x         FastAPI 0.111+ requires pydantic v2. Do NOT mix
-#                        with pydantic v1 packages.
-#
-#  apscheduler==3.10.4   v4.x is a full rewrite with a different API.
-#                        Stay on 3.x until migration is planned.
-#
-#  yfinance>=0.2.43      0.2.40 has a rate-limit bug where multi_download
-#                        silently returns empty DataFrames. 0.2.43+ fixes it.
-# ═══════════════════════════════════════════════════════════════════════════
+#  yfinance==0.2.54     0.2.40 had silent data gaps with fast_info on NSE tickers.
+#                       0.2.54 is latest stable with no breaking API changes to
+#                       .history(), .fast_info, .info, set_tz_cache_location().
+# ═══════════════════════════════════════════════════════════════════
 
-
-# ── Core Framework ────────────────────────────────────────────────────────────
-fastapi==0.111.1
-uvicorn[standard]==0.30.1       # includes websockets, httptools, uvloop
-pydantic==2.7.4
+# ── Core Framework ───────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
 pydantic-settings==2.3.4
-python-multipart==0.0.9         # required for UploadFile (CSV upload)
-aiofiles==23.2.1                # async file I/O used by FastAPI
+python-multipart==0.0.9       # required by FastAPI for UploadFile / File(...)
+aiofiles==23.2.1
 
+# ── Database ─────────────────────────────────────────────────────
+sqlalchemy==2.0.30
+alembic==1.13.1
+psycopg2-binary==2.9.9        # bundled libpq — no system libpq needed beyond Dockerfile gcc/libpq-dev
 
-# ── Database ──────────────────────────────────────────────────────────────────
-sqlalchemy==2.0.31
-alembic==1.13.2
-psycopg2-binary==2.9.9          # PostgreSQL driver with bundled libpq (Supabase)
-
-
-# ── Auth & Security ───────────────────────────────────────────────────────────
+# ── Auth & Security ──────────────────────────────────────────────
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1                   # 4.0.1 = last release before passlib compat break
+bcrypt==3.2.2                 # MUST stay at 3.x — see note above
 PyJWT==2.8.0
+httpx==0.27.0                 # used by core/auth.py for Resend OTP API (AsyncClient)
 python-dotenv==1.0.1
 
-
-# ── HTTP Client ───────────────────────────────────────────────────────────────
-httpx==0.27.0                   # used in auth.py (OTP via Resend API) + tests
-requests==2.32.3                # used by news scrapers + cloudscraper
-
-
-# ── Data & Numerics ───────────────────────────────────────────────────────────
-numpy==1.26.4                   # PINNED: numpy 2.x breaks scipy/sklearn/pyarrow
+# ── Data & Numerics ──────────────────────────────────────────────
+yfinance==0.2.54              # bumped from 0.2.40 — fixes fast_info gaps on NSE tickers
 pandas==2.2.2
-scipy==1.13.1
-scikit-learn==1.5.1             # LinearRegression for 12-24mo price forecast
-pyarrow==16.1.0                 # parquet cache for OHLCV data (/tmp/parquet)
+numpy==1.26.4
+scipy==1.13.0
+scikit-learn==1.5.0           # used by news_service.py (LinearRegression for price slope)
+pyarrow==16.1.0               # required for pandas .to_parquet() / .read_parquet()
 
+# ── Timezone Data ────────────────────────────────────────────────
+tzdata==2024.1                # REQUIRED on python:3.11-slim — slim image strips /usr/share/zoneinfo
+                              # Without this, ZoneInfo("Asia/Kolkata") raises ZoneInfoNotFoundError
+                              # and the APScheduler Asia/Kolkata TZ config fails at startup
 
-# ── Market Data ───────────────────────────────────────────────────────────────
-yfinance==0.2.43                # 0.2.40 had silent empty-DataFrame bug on rate limit
+# ── Web Scraping ─────────────────────────────────────────────────
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2                   # bs4 HTML parser backend used in data_manager.py and news_service.py
+cloudscraper==1.2.71          # used in data_manager.py for Moneycontrol scraping
 
+# ── TradingView ──────────────────────────────────────────────────
+tradingview-ta==3.3.0         # used in data_manager.py for TV signal confirmation
 
-# ── Web Scraping ──────────────────────────────────────────────────────────────
-beautifulsoup4==4.12.3          # HTML parsing for Moneycontrol/Google News
-lxml==5.2.2                     # fast HTML/XML parser backend for bs4
-cloudscraper==1.2.71            # Cloudflare bypass for Moneycontrol scraping
+# ── Scheduling ───────────────────────────────────────────────────
+apscheduler==3.10.4           # MUST stay at 3.x — see note above
 
-
-# ── TradingView ───────────────────────────────────────────────────────────────
-tradingview-ta==3.3.0           # TradingView technical analysis consensus
-
-
-# ── Scheduling ────────────────────────────────────────────────────────────────
-apscheduler==3.10.4             # PINNED: v4.x is full API rewrite, not compatible
-
-
-# ── Timezone ──────────────────────────────────────────────────────────────────
-tzdata==2024.1                  # zoneinfo fallback for Railway (slim image has
-                                # no /usr/share/zoneinfo). Required for
-                                # ZoneInfo("Asia/Kolkata") in scheduler + market
-                                # hours checks. Without this, zoneinfo raises
-                                # ZoneInfoNotFoundError on Railway's slim container.
-
-
-# ── Testing ───────────────────────────────────────────────────────────────────
+# ── Testing ──────────────────────────────────────────────────────
 pytest==8.2.2
-pytest-asyncio==0.23.7
+pytest-asyncio==0.23.7        # async test support; requires asyncio_mode="auto" in pytest config

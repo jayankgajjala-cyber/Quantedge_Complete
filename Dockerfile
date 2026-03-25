@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════
 #  Quantedge Trading System — Production Dockerfile
 #  FastAPI backend — Modules 1-8
-#
+#  
 #  Build:  docker build -t quantedge-backend .
 #  Run:    docker run --env-file .env.production -p 8000:8000 quantedge-backend
 # ═══════════════════════════════════════════════════════════════════
@@ -31,15 +31,8 @@ RUN pip install --upgrade pip setuptools wheel && \
 # ── Copy application code ─────────────────────────────────────────────
 COPY backend/ ./backend/
 
-# ── FIX: Copy start.sh into the image ────────────────────────────────
-# The Dockerfile previously only copied backend/ — start.sh lived at
-# the repo root and was never included in the image. Railway's
-# startCommand "sh start.sh" ran inside the container where the file
-# did not exist, causing: "sh: 0: cannot open start.sh: No such file"
-COPY start.sh ./start.sh
-RUN chmod +x ./start.sh
-
 # ── Create necessary runtime directories ─────────────────────────────
+# /tmp is always writable on ephemeral containers
 RUN mkdir -p /tmp/parquet /tmp/yf_cache logs
 
 # ── Non-root user for security ────────────────────────────────────────
@@ -48,13 +41,17 @@ USER appuser
 
 # ── Health check ──────────────────────────────────────────────────────
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # ── Expose port ───────────────────────────────────────────────────────
 EXPOSE 8000
 
 # ── Start command ─────────────────────────────────────────────────────
-# Shell form (not exec/JSON array) so $PORT is expanded at runtime.
-# Railway injects $PORT as an env var — JSON array CMD ["uvicorn",...,"8000"]
-# hard-codes the port and ignores Railway's dynamic $PORT assignment.
-CMD ["sh", "start.sh"]
+# --workers 1 required for APScheduler (single-process) + SQLite compat
+# For PostgreSQL (production): increase to 2-4 workers with --preload-app
+CMD ["uvicorn", "backend.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--log-level", "info", \
+     "--access-log"]
