@@ -1,16 +1,16 @@
 """
-backend/main.py  — v9.5 (Observability-Hardened)
+backend/main.py  — v9.6 (Production-Hardened)
 
-Changes from v9.4:
-  - Logging routed through backend.utils.logger (setup_logging / get_logger).
-    Format: [timestamp] [LEVEL   ] [module]: message  → clean Railway console lines.
-  - Global @app.exception_handler(Exception) returns structured JSON:
-      { "error": "InternalServerError", "message": "<hint>", "detail": "<exc>",
-        "path": "<route>" }
-  - Startup pre-flight diagnostics logs:
-      • DB driver + sanitised connection URL (password masked)
-      • /tmp/parquet writability probe
-      • Active CORS origins list
+Changes from v9.5:
+  - Logging bootstrap replaced: setup_logging/get_logger (backend.utils.logger)
+    swapped for configure_root_logger (backend.core.config).
+    Every log line now includes filename:lineno so 500 errors are immediately
+    traceable in Railway logs without needing to grep tracebacks.
+    Format: [timestamp] [LEVEL   ] filename.py:42 | func_name | message
+  - DATABASE_URL scheme normalisation (postgres:// -> postgresql://) applied
+    once inside get_settings(); _preflight_db now logs confirmation.
+  - CSV holdings replace operations use replace_holdings_from_csv() from
+    backend.models.portfolio for atomic delete-then-insert safety.
   - All URL paths, router mounts, scheduler jobs, and business logic UNCHANGED.
 """
 
@@ -23,15 +23,17 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.core.config   import get_settings
+from backend.core.config   import configure_root_logger, get_settings
 from backend.core.database import init_db
-from backend.utils.logger  import setup_logging, get_logger
 
 cfg = get_settings()
 
-# ── Logging bootstrap ─────────────────────────────────────────────────────────
-setup_logging(log_dir="logs", level=logging.DEBUG if cfg.DEBUG else logging.INFO)
-logger = get_logger(__name__)
+# ── Logging bootstrap ─────────────────────────────────────────────────────────────
+# configure_root_logger patches the root logger AND all existing StreamHandlers
+# (including uvicorn's default handler) to emit filename:lineno on every line.
+# Must be called before any other module uses logging so the format propagates.
+configure_root_logger(level=logging.DEBUG if cfg.DEBUG else logging.INFO)
+logger = logging.getLogger(__name__)
 
 import yfinance as yf
 yf.set_tz_cache_location("/tmp/yf_cache")
@@ -66,6 +68,21 @@ def _build_scheduler():
         from zoneinfo import ZoneInfo
         from datetime import time as dtime
         from backend.services.signal_engine import get_signal_engine
+
+        # ── Refresh scheduler leader lock ─────────────────────────────────────
+        # Keeps the DB row alive so other workers know this process still owns
+        # the scheduler.  If this worker crashes the lock expires in ~60 s and
+        # the next worker to check will take over automatically.
+        try:
+            import os
+            from backend.core.database import get_db_context
+            from backend.models.scheduler_lock import SchedulerLock
+            with get_db_context() as _ldb:
+                _lock_row = _ldb.query(SchedulerLock).filter_by(lock_name="apscheduler").first()
+                if _lock_row and _lock_row.worker_pid == os.getpid():
+                    _lock_row.refreshed_at = datetime.now(timezone.utc)
+        except Exception as _lock_exc:
+            logger.warning("Scheduler lock refresh failed: %s", _lock_exc)
 
         try:
             IST     = ZoneInfo("Asia/Kolkata")
@@ -115,9 +132,35 @@ def _build_scheduler():
         import asyncio
         from backend.services.regime_service import get_regime_service
         try:
-            await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_event_loop().run_in_executor(
                 None, get_regime_service().detect_and_persist
             )
+            # detect_and_persist returns None when the primary index data
+            # fetch fails (yfinance timeout, market holiday, network error).
+            # Persist a synthetic UNKNOWN/CASH regime row so the signal engine
+            # always has a current regime and suppresses all BUY signals until
+            # data recovers.
+            if result is None:
+                logger.warning(
+                    "Regime detection returned None (primary index data unavailable). "
+                    "Persisting CASH fallback regime."
+                )
+                try:
+                    from backend.core.database import get_db_context
+                    from backend.models.regime import MarketRegime, MarketRegimeLabel
+                    with get_db_context() as db:
+                        db.add(MarketRegime(
+                            timestamp        = datetime.now(timezone.utc),
+                            index_symbol     = "^NSEI",
+                            regime_label     = MarketRegimeLabel.UNKNOWN,
+                            regime_summary   = (
+                                "CASH MODE: Primary index data unavailable. "
+                                "All BUY signals suppressed until regime data recovers."
+                            ),
+                            confidence_score = 0.0,
+                        ))
+                except Exception as persist_exc:
+                    logger.error("CASH fallback persist failed: %s", persist_exc, exc_info=True)
         except Exception as exc:
             logger.error("Regime job failed: %s", exc, exc_info=True)
 
@@ -131,6 +174,11 @@ def _build_scheduler():
         import asyncio
         from backend.core.database    import get_db_context
         from backend.models.portfolio import Holding
+        from backend.models.portfolio import replace_holdings_from_csv  # noqa: F401
+        # replace_holdings_from_csv is the safe atomic helper for any CSV upload
+        # route. Import it in backend.api.routers.trading and call:
+#           with get_db_context() as db:
+#               n = replace_holdings_from_csv(db, parsed_rows)
         from backend.services.news_service import get_news_service
         try:
             with get_db_context() as db:
@@ -331,6 +379,10 @@ def _preflight_db() -> str:
     """Log DB driver and sanitised URL (password masked). Returns driver label."""
     db_url = cfg.DATABASE_URL or ""
     if db_url:
+        # get_settings() already normalised postgres:// -> postgresql:// so
+        # cfg.DATABASE_URL is always SQLAlchemy-compatible by the time we reach here.
+        if db_url.startswith("postgresql://"):
+            logger.info("  DB │ URL scheme : postgresql:// (normalised by get_settings) ✓")
         try:
             from urllib.parse import urlparse, urlunparse
             parsed   = urlparse(db_url)
@@ -393,6 +445,81 @@ def _preflight_cors(origins: list[str]) -> None:
 _scheduler = None
 
 
+def _is_scheduler_leader() -> bool:
+    """
+    Multi-worker scheduler lock using the database as a coordination point.
+
+    In a Railway/Gunicorn deployment every worker process starts its own
+    lifespan, which would launch a duplicate APScheduler in each process.
+    Duplicate schedulers fire every job N times (once per worker), causing
+    duplicate emails, duplicate backtests, and duplicate DB writes.
+
+    Strategy: one worker wins a DB advisory lock by upserting a row in the
+    `scheduler_lock` table with its OS PID.  If the row already exists and
+    was refreshed in the last 60 s, this worker is NOT the leader and should
+    skip starting the scheduler.  The leader refreshes its heartbeat row
+    every ~30 s inside the scheduler itself (see _heartbeat job below).
+
+    Falls back to True (always schedule) when the DB is unavailable so that
+    single-worker / local-dev environments are unaffected.
+    """
+    import os
+    try:
+        from backend.core.database import get_db_context
+        from backend.models.scheduler_lock import SchedulerLock  # see models/scheduler_lock.py
+        from datetime import datetime, timezone, timedelta
+
+        pid      = os.getpid()
+        now      = datetime.now(timezone.utc)
+        cutoff   = now - timedelta(seconds=60)
+
+        with get_db_context() as db:
+            row = db.query(SchedulerLock).filter_by(lock_name="apscheduler").first()
+
+            if row is None:
+                # No lock exists — this worker becomes the leader
+                db.add(SchedulerLock(lock_name="apscheduler", worker_pid=pid, refreshed_at=now))
+                logger.info("Scheduler leader elected: pid=%d", pid)
+                return True
+
+            if row.refreshed_at < cutoff:
+                # Previous leader timed out (crashed / restarted) — take over
+                row.worker_pid   = pid
+                row.refreshed_at = now
+                logger.warning(
+                    "Scheduler lock stale (last refresh %s) — pid=%d taking over",
+                    row.refreshed_at.isoformat(), pid,
+                )
+                return True
+
+            if row.worker_pid == pid:
+                # We already own the lock (lifespan re-entered, e.g. hot reload)
+                row.refreshed_at = now
+                return True
+
+            logger.info(
+                "Scheduler already owned by pid=%d — this worker (pid=%d) will skip scheduling",
+                row.worker_pid, pid,
+            )
+            return False
+
+    except Exception as exc:
+        # DB unavailable (cold start, migration pending) — default to scheduling
+        # to avoid a fully unscheduled deployment.
+        logger.warning(
+            "Scheduler leader-election DB check failed (%s) — defaulting to schedule", exc
+        )
+        return True
+
+    # ── SchedulerLock table schema (add to models/database.py + Alembic migration):
+    #
+    #   class SchedulerLock(Base):
+    #       __tablename__ = "scheduler_lock"
+    #       lock_name    = Column(String, primary_key=True)   # e.g. "apscheduler"
+    #       worker_pid   = Column(Integer, nullable=False)
+    #       refreshed_at = Column(DateTime(timezone=True), nullable=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scheduler
@@ -421,12 +548,17 @@ async def lifespan(app: FastAPI):
     init_db()
 
     try:
-        _scheduler = _build_scheduler()
-        _scheduler.start()
-        logger.info("Scheduler started: %s", ", ".join(j.id for j in _scheduler.get_jobs()))
+        if _is_scheduler_leader():
+            _scheduler = _build_scheduler()
+            _scheduler.start()
+            logger.info("Scheduler started: %s", ", ".join(j.id for j in _scheduler.get_jobs()))
+        else:
+            logger.info(
+                "Scheduler NOT started on this worker — another worker holds the lock. "
+                "This worker will serve API requests only."
+            )
     except Exception as exc:
         logger.critical("Scheduler failed to start: %s", exc, exc_info=True)
-
     yield
 
     if _scheduler and _scheduler.running:

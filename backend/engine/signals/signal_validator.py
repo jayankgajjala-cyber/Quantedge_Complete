@@ -25,8 +25,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from engine.signals.price_feed import CandleData
-from models.signals_db import RegimeMode, SignalType
+from backend.engine.signals.price_feed import CandleData
+from backend.models.signals import RegimeMode, SignalType
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ TARGET_1_MULTIPLIER     = 2.0     # target1 = entry + 2.0 × ATR
 TARGET_2_MULTIPLIER     = 3.5     # target2 = entry + 3.5 × ATR
 MIN_RISK_REWARD         = 1.5     # minimum acceptable R:R for BUY signals
 PRICE_PROXIMITY_PCT     = 0.02    # entry must be within 2% of current price
+SENTIMENT_DEMOTE_THRESH = -0.5    # news sentiment below this → demote BUY → HOLD
 
 REGIME_POSITION_SIZE: dict[RegimeMode, float] = {
     RegimeMode.STRONG_TREND:       1.00,
@@ -67,6 +68,7 @@ def validate_signal(
     atr_value:       Optional[float],
     regime:          RegimeMode,
     strategy_name:   str,
+    sentiment_score: Optional[float] = None,
 ) -> ValidationResult:
     """
     Validate a proposed signal against live price data.
@@ -78,6 +80,10 @@ def validate_signal(
     atr_value       : ATR(14) from daily data for stop sizing
     regime          : current market regime mode
     strategy_name   : for logging only
+    sentiment_score : optional news/social sentiment score in [-1, +1].
+                      A value below SENTIMENT_DEMOTE_THRESH (-0.5) demotes
+                      a technical BUY signal to HOLD to avoid buying into
+                      strongly negative news flow.
 
     Returns
     -------
@@ -96,6 +102,35 @@ def validate_signal(
             target_2          = None,
             risk_reward_ratio = None,
             position_size_pct = 0.0,
+        )
+
+    # ── Sentiment gate ────────────────────────────────────────────────────────
+    # If a news/social sentiment score is provided and strongly negative,
+    # demote a technical BUY to HOLD to avoid entering against adverse news flow.
+    # SELL signals are NOT demoted – closing / shorting into bad news is fine.
+    if (
+        proposed_signal == SignalType.BUY
+        and sentiment_score is not None
+        and sentiment_score < SENTIMENT_DEMOTE_THRESH
+    ):
+        logger.info(
+            "[%s] Sentiment gate: BUY → HOLD for %s "
+            "(sentiment_score=%.3f < threshold %.2f)",
+            strategy_name, candle.symbol, sentiment_score, SENTIMENT_DEMOTE_THRESH,
+        )
+        return ValidationResult(
+            passed            = False,
+            signal_type       = SignalType.HOLD,
+            entry_price       = None,
+            stop_loss         = None,
+            target_1          = None,
+            target_2          = None,
+            risk_reward_ratio = None,
+            position_size_pct = 0.0,
+            rejection_reason  = (
+                f"Sentiment gate: score={sentiment_score:.3f} "
+                f"below threshold {SENTIMENT_DEMOTE_THRESH}. BUY demoted to HOLD."
+            ),
         )
 
     # ── VOLATILE regime → no BUY/SELL unless strategy explicitly passed ───────

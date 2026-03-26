@@ -52,7 +52,7 @@ class TestAgreementFactor:
 
     def test_bonus_when_three_agree_buy(self):
         from engine.signals.agreement_factor import compute_agreement
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [
             {"ticker": "SBIN", "signal_type": SignalType.BUY},
             {"ticker": "SBIN", "signal_type": SignalType.BUY},
@@ -66,7 +66,7 @@ class TestAgreementFactor:
 
     def test_no_bonus_when_only_two_agree(self):
         from engine.signals.agreement_factor import compute_agreement
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [
             {"ticker": "TCS", "signal_type": SignalType.BUY},
             {"ticker": "TCS", "signal_type": SignalType.BUY},
@@ -78,7 +78,7 @@ class TestAgreementFactor:
 
     def test_sell_agreement_earns_bonus(self):
         from engine.signals.agreement_factor import compute_agreement
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [
             {"ticker": "INFY", "signal_type": SignalType.SELL},
             {"ticker": "INFY", "signal_type": SignalType.SELL},
@@ -91,7 +91,7 @@ class TestAgreementFactor:
 
     def test_agreement_pct_calculation(self):
         from engine.signals.agreement_factor import compute_agreement
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [
             {"ticker": "X", "signal_type": SignalType.BUY},
             {"ticker": "X", "signal_type": SignalType.BUY},
@@ -115,7 +115,7 @@ class TestBiasGuardrail:
 
     def test_bias_detected_at_80pct_hold(self):
         from engine.signals.agreement_factor import detect_scan_bias
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [{"signal_type": SignalType.HOLD}] * 8 + \
                   [{"signal_type": SignalType.BUY}] * 2
         result = detect_scan_bias(signals)
@@ -125,7 +125,7 @@ class TestBiasGuardrail:
 
     def test_no_bias_below_threshold(self):
         from engine.signals.agreement_factor import detect_scan_bias
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [{"signal_type": SignalType.HOLD}] * 5 + \
                   [{"signal_type": SignalType.BUY}] * 5
         result = detect_scan_bias(signals)
@@ -134,7 +134,7 @@ class TestBiasGuardrail:
 
     def test_exactly_80pct_triggers_bias(self):
         from engine.signals.agreement_factor import detect_scan_bias
-        from models.signals_db import SignalType
+        from backend.models.signals import SignalType
         signals = [{"signal_type": SignalType.HOLD}] * 4 + \
                   [{"signal_type": SignalType.BUY}] * 1
         result = detect_scan_bias(signals)
@@ -202,7 +202,7 @@ class TestSignalValidator:
 
     def test_valid_buy_passes(self):
         from engine.signals.signal_validator import validate_signal
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=True)
         result = validate_signal(SignalType.BUY, candle, atr_value=10.0,
                                   regime=RegimeMode.STRONG_TREND, strategy_name="Test")
@@ -214,7 +214,7 @@ class TestSignalValidator:
 
     def test_volume_not_confirmed_blocks_signal(self):
         from engine.signals.signal_validator import validate_signal
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=False, vol_ratio=0.8)
         result = validate_signal(SignalType.BUY, candle, atr_value=10.0,
                                   regime=RegimeMode.STRONG_TREND, strategy_name="Test")
@@ -223,7 +223,7 @@ class TestSignalValidator:
 
     def test_stale_candle_blocked(self):
         from engine.signals.signal_validator import validate_signal
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=True, stale=True)
         result = validate_signal(SignalType.BUY, candle, atr_value=10.0,
                                   regime=RegimeMode.STRONG_TREND, strategy_name="Test")
@@ -232,7 +232,7 @@ class TestSignalValidator:
 
     def test_volatile_regime_buy_suppressed(self):
         from engine.signals.signal_validator import validate_signal
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=True)
         result = validate_signal(SignalType.BUY, candle, atr_value=10.0,
                                   regime=RegimeMode.VOLATILE_HIGH_RISK, strategy_name="Test")
@@ -241,7 +241,7 @@ class TestSignalValidator:
 
     def test_hold_always_passes(self):
         from engine.signals.signal_validator import validate_signal
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=False, stale=True)
         result = validate_signal(SignalType.HOLD, candle, atr_value=10.0,
                                   regime=RegimeMode.SIDEWAYS, strategy_name="Test")
@@ -251,7 +251,7 @@ class TestSignalValidator:
     def test_rr_below_minimum_blocks_buy(self):
         """With a huge ATR relative to close, T1 may still meet R:R — test boundary."""
         from engine.signals.signal_validator import validate_signal, MIN_RISK_REWARD
-        from models.signals_db import RegimeMode, SignalType
+        from backend.models.signals import RegimeMode, SignalType
         candle = self._make_candle(confirmed=True, close=100.0)
         # ATR = 1, stop = 100 - 1.5 = 98.5 (risk=1.5), target = 100 + 2.0 = 102 (reward=2.0)
         # R:R = 2.0/1.5 = 1.33 < 1.5 → should be blocked
@@ -275,7 +275,7 @@ class TestRegimeSwitchboard:
 
     def test_strong_trend_picks_highest_sharpe(self):
         from engine.signals.regime_switchboard import map_best_strategy
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         best = self._make_perf("Trend_EMA_Cross", sharpe=2.1)
         db   = MagicMock()
@@ -289,7 +289,7 @@ class TestRegimeSwitchboard:
 
     def test_volatile_force_cash_when_no_mr_qualifies(self):
         from engine.signals.regime_switchboard import map_best_strategy
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         db = MagicMock()
         # All queries return None → no qualifying strategy
@@ -302,7 +302,7 @@ class TestRegimeSwitchboard:
 
     def test_volatile_allows_mr_above_65_win_rate(self):
         from engine.signals.regime_switchboard import map_best_strategy, VOLATILE_ALLOWED_WIN_RATE
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         good_mr = self._make_perf("Mean_Reversion_ZScore", win_rate=70.0)
         db = MagicMock()
@@ -314,7 +314,7 @@ class TestRegimeSwitchboard:
 
     def test_sideways_picks_highest_win_rate(self):
         from engine.signals.regime_switchboard import map_best_strategy
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         best = self._make_perf("Bollinger_Reversion", win_rate=72.0)
         db = MagicMock()
@@ -326,7 +326,7 @@ class TestRegimeSwitchboard:
 
     def test_unknown_regime_falls_back_to_best_sharpe(self):
         from engine.signals.regime_switchboard import map_best_strategy
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         fallback = self._make_perf("Factor_Momentum", sharpe=1.8)
         db = MagicMock()
@@ -339,7 +339,7 @@ class TestRegimeSwitchboard:
 
     def test_no_data_returns_force_cash(self):
         from engine.signals.regime_switchboard import map_best_strategy
-        from models.database import MarketRegimeLabel
+        from backend.models.regime import MarketRegimeLabel
 
         db = MagicMock()
         db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
@@ -355,7 +355,7 @@ class TestRegimeSwitchboard:
 class TestFinalSignalSchema:
 
     def test_to_frontend_json_has_required_keys(self):
-        from models.signals_db import FinalSignal, SignalType, RegimeMode, SignalStatus
+        from backend.models.signals import FinalSignal, SignalType, RegimeMode, SignalStatus
         from datetime import datetime
 
         fs = FinalSignal(

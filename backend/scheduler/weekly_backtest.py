@@ -28,7 +28,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from models.session import SessionLocal
+from backend.core.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,8 @@ def _snapshot_best_strategies(db: Session) -> dict[str, dict]:
     Capture the current top-Sharpe strategy per ticker.
     Returns dict: {ticker: {strategy_name, sharpe_ratio, cagr, win_rate}}
     """
-    from models.database import StrategyPerformance, DataQuality
+    from backend.models.backtest import StrategyPerformance
+    from backend.models.portfolio import DataQuality
     from sqlalchemy import func
 
     # Subquery: max Sharpe per ticker
@@ -153,7 +154,7 @@ def run_weekly_backtest_refresh() -> dict:
         logger.info("Pre-refresh snapshot: %d tickers have strategy data", len(before))
 
         # ── Load portfolio tickers ────────────────────────────────────────────
-        from models.database import Holding
+        from backend.models.portfolio import Holding
         holdings = db.query(Holding).all()
         tickers  = [h.symbol for h in holdings]
 
@@ -224,30 +225,18 @@ def run_weekly_backtest_refresh() -> dict:
 
 def _send_weekly_backtest_email(summary: dict, changes: list[dict]) -> None:
     """Send a summary email of the weekly backtest results."""
-    from services.research.alert_service import send_priority_alert
-
-    change_bullets = [f"• {c['ticker']}: {c.get('old_strategy','N/A')} → {c.get('new_strategy','N/A')} "
-                      f"(Sharpe: {c.get('old_sharpe') or 'N/A'} → {c.get('new_sharpe') or 'N/A'})"
-                      for c in changes[:3]]
-
-    if not change_bullets:
-        change_bullets = ["• No strategy changes detected — all tickers stable"]
-
-    send_priority_alert(
-        ticker            = "PORTFOLIO",
-        signal            = "WEEKLY BACKTEST REFRESH",
-        confidence        = 100.0,
-        regime            = "WEEKLY_MAINTENANCE",
-        sentiment_score   = 0.5,
-        sentiment_label   = "NEUTRAL",
-        executive_summary = change_bullets,
-        forecast          = (
-            f"Processed {summary['tickers_processed']} tickers × 8 strategies in "
-            f"{summary['elapsed_seconds']:.0f}s. "
-            f"{summary['strategy_changes']} strategy change(s) detected."
-        ),
-        strategy_name     = "Weekly Backtest Refresh",
+    # send_priority_alert was removed (services.research.alert_service no longer exists).
+    # Summary is logged to Railway logs instead — visible in the Railway dashboard.
+    logger.info(
+        "WEEKLY BACKTEST SUMMARY | tickers=%d | changes=%d | elapsed=%.0fs",
+        summary['tickers_processed'], summary['strategy_changes'], summary['elapsed_seconds'],
     )
+    for c in changes[:3]:
+        logger.info(
+            "  CHANGE %s: %s → %s (Sharpe: %s → %s)",
+            c['ticker'], c.get('old_strategy','N/A'), c.get('new_strategy','N/A'),
+            c.get('old_sharpe') or 'N/A', c.get('new_sharpe') or 'N/A',
+        )
 
 
 # ─── APScheduler async wrapper ────────────────────────────────────────────────

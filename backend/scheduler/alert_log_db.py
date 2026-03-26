@@ -6,7 +6,7 @@ Records every sent alert for rate limiting and audit purposes.
 
 from datetime import datetime
 from sqlalchemy import Column, Integer, Float, String, DateTime, Boolean, Text, Index
-from models.database import Base
+from backend.core.database import Base
 
 
 class AlertDispatchLog(Base):

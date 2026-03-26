@@ -50,19 +50,21 @@ import yfinance as yf
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from engine.indicators.technical import enrich_dataframe, atr as calc_atr
-from engine.signals.agreement_factor import (
+from backend.engine.indicators.technical import enrich_dataframe, atr as calc_atr
+from backend.engine.signals.agreement_factor import (
     apply_confidence_adjustments,
     compute_agreement,
     detect_scan_bias,
 )
-from engine.signals.price_feed import CandleData, fetch_latest_candles, is_market_open
-from engine.signals.regime_switchboard import map_best_strategy
-from engine.signals.signal_validator import validate_signal
-from engine.strategies.library import all_strategy_instances
-from models.database import Holding, MarketRegime, MarketRegimeLabel, StrategyPerformance
-from models.session import SessionLocal
-from models.signals_db import (
+from backend.engine.signals.price_feed import CandleData, fetch_latest_candles, is_market_open
+from backend.engine.signals.regime_switchboard import map_best_strategy
+from backend.engine.signals.signal_validator import validate_signal
+from backend.engine.strategies.library import all_strategy_instances
+from backend.models.portfolio import Holding
+from backend.models.regime import MarketRegime, MarketRegimeLabel
+from backend.models.backtest import StrategyPerformance
+from backend.core.database import SessionLocal
+from backend.models.signals import (
     FinalSignal,
     LiveSignal,
     RegimeMode,

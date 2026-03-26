@@ -16,6 +16,12 @@ GET  /api/trading/paper/trades              → list trades (with live MTM)
 GET  /api/trading/paper/budget              → current month budget status
 POST /api/trading/paper/allocate            → calculate suggested allocation
 GET  /api/trading/backtest/run/{ticker}     → run backtest for one ticker
+
+FIXES (v9.3):
+  - FIX 1: upload_portfolio now DELETES all existing holdings before inserting
+            new rows so sold stocks are correctly removed on each CSV re-upload.
+  - FIX 2: list_holdings returns a structured empty-state response when the
+            holdings table is empty — no yfinance calls are made in that case.
 """
 
 import io
@@ -98,6 +104,11 @@ async def upload_portfolio(
     file: UploadFile = File(..., description="Zerodha holdings CSV"),
     db:   Session    = Depends(get_db),
 ):
+    """
+    FIX 1: Deletes ALL existing holdings before inserting the new CSV rows.
+    This ensures stocks that were sold and no longer appear in the export
+    are properly removed from the database — not left as stale rows.
+    """
     try:
         raw = await file.read()
         if not raw:
@@ -117,7 +128,16 @@ async def upload_portfolio(
                 f"Export from Zerodha Console → Portfolio → Holdings."
             )
 
-        df       = df.dropna(subset=["instrument"])
+        df = df.dropna(subset=["instrument"])
+
+        # ── FIX 1: Wipe old holdings so sold stocks are not retained ──────────
+        deleted_count = db.query(Holding).delete(synchronize_session=False)
+        logger.info("upload_portfolio: deleted %d stale holding rows before re-import", deleted_count)
+        # Flush the deletes so the INSERT below doesn't hit unique-constraint
+        # conflicts on symbol if the same ticker reappears in the new CSV.
+        db.flush()
+        # ─────────────────────────────────────────────────────────────────────
+
         imported = skipped = 0
         for _, row in df.iterrows():
             try:
@@ -127,14 +147,9 @@ async def upload_portfolio(
                 if qty <= 0 or avg_p <= 0:
                     skipped += 1
                     continue
-                h = db.query(Holding).filter(Holding.symbol == symbol).first()
-                if h:
-                    h.quantity      = qty
-                    h.average_price = avg_p
-                    h.updated_at    = datetime.utcnow()
-                else:
-                    h = Holding(symbol=symbol, quantity=qty, average_price=avg_p)
-                    db.add(h)
+                # Always insert fresh rows (old rows were deleted above)
+                h = Holding(symbol=symbol, quantity=qty, average_price=avg_p)
+                db.add(h)
                 imported += 1
             except Exception:
                 skipped += 1
@@ -142,8 +157,12 @@ async def upload_portfolio(
         db.commit()
         return {
             "status":   "success",
-            "message":  f"Imported {imported} holdings, {skipped} rows skipped.",
+            "message":  (
+                f"Imported {imported} holdings ({deleted_count} stale rows removed), "
+                f"{skipped} rows skipped."
+            ),
             "imported": imported,
+            "deleted":  deleted_count,
             "skipped":  skipped,
         }
     except Exception as exc:
@@ -153,11 +172,26 @@ async def upload_portfolio(
 
 @router.get("/portfolio/holdings", summary="List all holdings with live P&L")
 def list_holdings(db: Session = Depends(get_db)):
+    """
+    FIX 2: Returns a structured empty-state payload when the holdings table is
+    empty. No yfinance API calls are made in that case, preventing cascading
+    errors on a fresh deploy before any CSV has been uploaded.
+    """
     try:
         holdings = db.query(Holding).order_by(Holding.symbol).all()
-        if not holdings:
-            return {"status": "success", "data": [], "message": "No holdings yet. Upload a Zerodha CSV to get started."}
 
+        # ── FIX 2: Empty-portfolio guard — stop all downstream API calls ──────
+        if not holdings:
+            return {
+                "status":  "empty",
+                "message": (
+                    "No portfolio found; waiting for Zerodha holdings input in CSV file."
+                ),
+                "data": [],
+            }
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Only call yfinance when we actually have holdings to price
         live_prices = _batch_live_prices([h.symbol for h in holdings])
 
         result = []
@@ -180,7 +214,7 @@ def list_holdings(db: Session = Depends(get_db)):
                 "data_quality":  (h.data_quality.value if hasattr(h.data_quality, "value") else str(h.data_quality)),
                 "uploaded_at":   (h.updated_at.isoformat() if getattr(h, "updated_at", None) else None),
             })
-        return result
+        return {"status": "success", "data": result}
 
     except sa_exc.OperationalError as exc:
         logger.error("list_holdings DB connection error: %s", exc, exc_info=True)

@@ -36,27 +36,27 @@ class TestPasswordVerification:
     """core/auth_service.py – verify_credentials()"""
 
     def test_correct_credentials(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("Jayank8294", "Jayanju@9498") is True
 
     def test_wrong_password(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("Jayank8294", "wrongpassword") is False
 
     def test_wrong_username(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("NotAUser", "Jayanju@9498") is False
 
     def test_empty_credentials(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("", "") is False
 
     def test_case_sensitive_username(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("jayank8294", "Jayanju@9498") is False
 
     def test_case_sensitive_password(self):
-        from core.auth_service import verify_credentials
+        from backend.core.auth import verify_credentials
         assert verify_credentials("Jayank8294", "jayanju@9498") is False
 
 
@@ -67,21 +67,21 @@ class TestOTPStore:
         return asyncio.get_event_loop().run_until_complete(coro)
 
     def test_create_and_verify_otp(self):
-        from core.otp_store import create_otp, verify_otp
+        from backend.core.auth import create_otp, verify_otp
         raw = self._run(create_otp("testuser"))
         assert len(raw) == 6 and raw.isdigit()
         ok, msg = self._run(verify_otp("testuser", raw))
         assert ok is True, msg
 
     def test_wrong_otp_rejected(self):
-        from core.otp_store import create_otp, verify_otp
+        from backend.core.auth import create_otp, verify_otp
         self._run(create_otp("testuser2"))
         ok, msg = self._run(verify_otp("testuser2", "000000"))
         assert ok is False
         assert "Invalid" in msg
 
     def test_single_use_enforcement(self):
-        from core.otp_store import create_otp, verify_otp
+        from backend.core.auth import create_otp, verify_otp
         raw = self._run(create_otp("testuser3"))
         ok1, _ = self._run(verify_otp("testuser3", raw))
         ok2, msg2 = self._run(verify_otp("testuser3", raw))
@@ -90,14 +90,14 @@ class TestOTPStore:
         assert "already been used" in msg2 or "No OTP" in msg2
 
     def test_no_otp_for_user(self):
-        from core.otp_store import verify_otp
+        from backend.core.auth import verify_otp
         ok, msg = self._run(verify_otp("ghost_user", "123456"))
         assert ok is False
         assert "No OTP" in msg
 
     def test_expired_otp(self):
         """Simulate expiry by patching time.monotonic."""
-        from core import otp_store
+        import backend.core.auth as otp_store  # merged module
         raw = asyncio.get_event_loop().run_until_complete(
             otp_store.create_otp("expire_user")
         )
@@ -113,7 +113,7 @@ class TestOTPStore:
         assert "expired" in msg.lower()
 
     def test_invalidate_clears_otp(self):
-        from core.otp_store import create_otp, invalidate_otp, verify_otp
+        from backend.core.auth import create_otp, invalidate_otp, verify_otp
         self._run(create_otp("inv_user"))
         self._run(invalidate_otp("inv_user"))
         ok, _ = self._run(verify_otp("inv_user", "123456"))
@@ -127,13 +127,13 @@ class TestRateLimiter:
         return asyncio.get_event_loop().run_until_complete(coro)
 
     def test_no_lockout_initially(self):
-        from core.rate_limiter import check_lockout
+        from backend.core.auth import check_lockout
         locked, remaining = self._run(check_lockout("fresh_user"))
         assert locked is False
         assert remaining == 0.0
 
     def test_lockout_after_three_failures(self):
-        from core.rate_limiter import check_lockout, record_failure, record_success
+        from backend.core.auth import check_lockout, record_failure, record_success
         user = "brute_user_test"
         self._run(record_success(user))            # reset first
 
@@ -147,7 +147,7 @@ class TestRateLimiter:
         assert remaining > 0
 
     def test_success_resets_counter(self):
-        from core.rate_limiter import check_lockout, record_failure, record_success
+        from backend.core.auth import check_lockout, record_failure, record_success
         user = "reset_user_test"
         self._run(record_failure(user))
         self._run(record_failure(user))
@@ -163,7 +163,7 @@ class TestJWTHandler:
 
     def test_create_and_decode_token(self):
         from core.config import JWT_ALGORITHM, JWT_SECRET_KEY
-        from core.jwt_handler import create_access_token
+        from backend.core.auth import create_access_token
         token, expiry = create_access_token("Jayank8294")
         assert isinstance(token, str) and len(token) > 20
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
@@ -172,7 +172,7 @@ class TestJWTHandler:
 
     def test_expired_token_rejected(self):
         from core.config import JWT_ALGORITHM, JWT_SECRET_KEY
-        from core.jwt_handler import _decode_token
+        from backend.core.auth import _decode_token
         from fastapi import HTTPException
 
         expired_payload = {
@@ -189,7 +189,7 @@ class TestJWTHandler:
         assert "expired" in exc_info.value.detail.lower()
 
     def test_tampered_token_rejected(self):
-        from core.jwt_handler import _decode_token
+        from backend.core.auth import _decode_token
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
@@ -197,7 +197,7 @@ class TestJWTHandler:
         assert exc_info.value.status_code == 401
 
     def test_wrong_secret_rejected(self):
-        from core.jwt_handler import _decode_token
+        from backend.core.auth import _decode_token
         from fastapi import HTTPException
 
         bad_token = jwt.encode(
@@ -219,7 +219,7 @@ class TestEmailService:
 
     def test_dev_mode_no_api_key(self):
         """When RESEND_API_KEY is empty, returns True in dev mode."""
-        from core import email_service
+        import backend.core.auth as email_service  # merged module
         with patch.object(email_service, "RESEND_API_KEY", ""):
             ok, msg = self._run(email_service.send_otp_email("123456", "Jayank8294"))
         assert ok is True
@@ -228,7 +228,7 @@ class TestEmailService:
     def test_resend_success(self):
         """Simulates a successful Resend 200 response."""
         import httpx
-        from core import email_service
+        import backend.core.auth as email_service  # merged module
 
         mock_response = AsyncMock()
         mock_response.status_code = 200
@@ -249,7 +249,7 @@ class TestEmailService:
 
     def test_resend_api_error(self):
         """Simulates a Resend 4xx error."""
-        from core import email_service
+        import backend.core.auth as email_service  # merged module
 
         mock_response = AsyncMock()
         mock_response.status_code = 403

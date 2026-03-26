@@ -28,12 +28,9 @@ from typing import Optional
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from models.database import (
-    MarketRegime,
-    MarketRegimeLabel,
-    StrategyPerformance,
-)
-from models.signals_db import RegimeMode
+from backend.models.regime import MarketRegime, MarketRegimeLabel
+from backend.models.backtest import StrategyPerformance
+from backend.models.signals import RegimeMode
 
 logger = logging.getLogger(__name__)
 

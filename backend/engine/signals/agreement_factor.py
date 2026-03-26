@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from models.signals_db import SignalType
+from backend.models.signals import SignalType
 
 logger = logging.getLogger(__name__)
 

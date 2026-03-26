@@ -27,15 +27,16 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
 
-from core.config import (
-    ALERT_CONFIDENCE_THRESHOLD,
-    ALERT_EMAIL_FROM,
-    ALERT_EMAIL_TO,
-    FRONTEND_BASE_URL,
-    GMAIL_APP_PASSWORD,
-    SMTP_HOST,
-    SMTP_PORT,
-)
+from backend.core.config import get_settings as _get_settings
+
+_cfg = _get_settings()
+ALERT_CONFIDENCE_THRESHOLD = _cfg.ALERT_CONFIDENCE_THRESHOLD
+ALERT_EMAIL_FROM           = _cfg.ALERT_EMAIL_FROM
+ALERT_EMAIL_TO             = _cfg.ALERT_EMAIL_TO
+FRONTEND_BASE_URL          = _cfg.FRONTEND_BASE_URL
+GMAIL_APP_PASSWORD         = _cfg.GMAIL_APP_PASSWORD
+SMTP_HOST                  = _cfg.SMTP_HOST
+SMTP_PORT                  = _cfg.SMTP_PORT
 
 logger = logging.getLogger(__name__)
 

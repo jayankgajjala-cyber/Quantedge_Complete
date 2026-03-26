@@ -24,8 +24,11 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from core.config import MAX_ALERTS_PER_DAY
-from scheduler.alert_log_db import AlertDispatchLog
+from backend.core.config import get_settings as _get_settings
+from backend.scheduler.alert_log_db import AlertDispatchLog
+
+_cfg = _get_settings()
+MAX_ALERTS_PER_DAY = _cfg.MAX_ALERTS_PER_DAY
 
 logger = logging.getLogger(__name__)
 

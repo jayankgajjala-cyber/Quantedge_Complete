@@ -26,7 +26,7 @@ import yfinance as yf
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
 
-from engine.indicators.technical import (
+from backend.engine.indicators.technical import (
     adx as calc_adx,
     atr as calc_atr,
     atr_percentile,
@@ -34,8 +34,8 @@ from engine.indicators.technical import (
     ema as calc_ema,
     rolling_slope,
 )
-from models.database import MarketRegime, MarketRegimeLabel
-from models.session import SessionLocal
+from backend.models.regime import MarketRegime, MarketRegimeLabel
+from backend.core.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 

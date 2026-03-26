@@ -23,9 +23,12 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from core.config import ALERT_CONFIDENCE_THRESHOLD
-from scheduler.alert_rate_limiter import can_send_alert, record_alert_sent
-from scheduler.signal_alert_email import send_signal_alert_email
+from backend.core.config import get_settings as _get_settings
+from backend.scheduler.alert_rate_limiter import can_send_alert, record_alert_sent
+from backend.scheduler.signal_alert_email import send_signal_alert_email
+
+_cfg = _get_settings()
+ALERT_CONFIDENCE_THRESHOLD = _cfg.ALERT_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 

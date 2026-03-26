@@ -16,6 +16,16 @@ GET  /api/dashboard/research/{ticker} → full news + sentiment + forecast
 GET  /api/dashboard/research/{ticker}/articles → raw news articles
 GET  /api/dashboard/notifications → recent alert dispatch log      (matches useNotifications)
 GET  /api/dashboard/leaderboard   → top strategies by Sharpe       (matches useLeaderboard)
+
+FIXES (v9.3):
+  - FIX 1: /regime now returns HTTP 503 (not 404) on DB errors and 200 + an
+            empty-state payload when no regime row exists yet, so the frontend
+            never crashes with "j.reduce is not a function" on a null response.
+  - FIX 2: get_dashboard, get_latest_signals, and scan_now all check for an
+            empty holdings table first.  If empty they short-circuit with a
+            structured payload and skip all yfinance / signal-scan calls.
+  - FIX 3: _holdings_exist() helper centralises the empty-portfolio check so
+            it is reused consistently across all affected endpoints.
 """
 
 import json
@@ -33,7 +43,7 @@ from backend.core.auth     import get_current_user
 from backend.core.database import get_db
 from backend.models.backtest  import StrategyPerformance
 from backend.models.news      import NewsAnalysis, NewsArticle as NewsArticleModel
-from backend.models.portfolio import DataQuality
+from backend.models.portfolio import DataQuality, Holding
 from backend.models.regime    import MarketRegime
 from backend.models.signals   import FinalSignal, SignalStatus, SignalType
 from backend.models.alerts           import AlertDispatchLog
@@ -47,6 +57,10 @@ router = APIRouter(
     prefix="/dashboard",
     tags=["Dashboard"],
     dependencies=[Depends(get_current_user)],
+)
+
+_EMPTY_PORTFOLIO_MSG = (
+    "No portfolio found; waiting for Zerodha holdings input in CSV file."
 )
 
 
@@ -145,6 +159,14 @@ class NewsArticleOut(BaseModel):
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def _holdings_exist(db: Session) -> bool:
+    """
+    FIX 2 helper: Returns True only when at least one Holding row exists.
+    Uses a cheap EXISTS-style scalar query (no full table scan).
+    """
+    return db.query(Holding.id).limit(1).scalar() is not None
+
+
 def _signal_to_out(r: FinalSignal) -> SignalOut:
     """Safely serialise a FinalSignal ORM row to SignalOut."""
     confirmations: Optional[dict] = None
@@ -198,7 +220,29 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
+    """
+    FIX 2: Returns a structured empty-state payload when no holdings exist,
+    skipping all signal queries and yfinance calls.
+    """
     try:
+        # ── FIX 2: Empty-portfolio guard ─────────────────────────────────────
+        if not _holdings_exist(db):
+            return {
+                "status":             "empty",
+                "message":            _EMPTY_PORTFOLIO_MSG,
+                "regime":             "UNKNOWN",
+                "regime_confidence":  0.0,
+                "regime_summary":     None,
+                "total_buy_signals":  0,
+                "total_sell_signals": 0,
+                "total_hold_signals": 0,
+                "top_signals":        [],
+                "bias_warning":       False,
+                "bias_message":       "",
+                "last_scan_at":       None,
+            }
+        # ─────────────────────────────────────────────────────────────────────
+
         regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
         subq = (
@@ -234,6 +278,7 @@ def get_dashboard(db: Session = Depends(get_db)):
         bias_msg   = f"Bias detected: {hold_sigs}/{total_sigs} HOLD signals — confidence reduced" if bias_flag else ""
 
         return {
+            "status":             "success",
             "regime":             regime.regime_label.value if regime else "UNKNOWN",
             "regime_confidence":  regime.confidence_score if regime else 0.0,
             "regime_summary":     regime.regime_summary if regime else None,
@@ -269,8 +314,14 @@ def get_dashboard(db: Session = Depends(get_db)):
         raise HTTPException(500, detail=f"Dashboard load failed: {exc}")
 
 
-@router.get("/regime", response_model=RegimeOut, summary="Latest Nifty 50 market regime snapshot")
+@router.get("/regime", summary="Latest Nifty 50 market regime snapshot")
 def get_regime(db: Session = Depends(get_db)):
+    """
+    FIX 1: Returns a structured 200 empty-state payload (not a 404) when no
+    regime row exists yet.  This prevents the frontend JS from crashing with
+    "j.reduce is not a function" when it tries to iterate over a null/error
+    response body — the frontend receives a well-formed object in all cases.
+    """
     try:
         row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
     except sa_exc.OperationalError as exc:
@@ -291,8 +342,19 @@ def get_regime(db: Session = Depends(get_db)):
                 "Verify your DATABASE_URL and run the app once to initialise tables."
             ),
         )
+
+    # ── FIX 1: Return a safe empty-state object instead of raising 404 ───────
     if not row:
-        raise HTTPException(404, "No regime data yet. Scheduler runs every 5 minutes.")
+        return {
+            "status":         "empty",
+            "message":        "No regime data yet — scheduler runs every 5 minutes.",
+            "regime_label":   "UNKNOWN",
+            "confidence_score": 0.0,
+            "regime_summary": None,
+            "timestamp":      None,
+        }
+    # ─────────────────────────────────────────────────────────────────────────
+
     return RegimeOut(
         id               = row.id,
         timestamp        = row.timestamp,
@@ -315,6 +377,12 @@ def get_latest_signals(
     limit:          int           = Query(50, ge=1, le=200),
     db:             Session       = Depends(get_db),
 ):
+    # ── FIX 2: Empty-portfolio guard — return [] immediately ─────────────────
+    if not _holdings_exist(db):
+        logger.info("get_latest_signals: no holdings found, returning empty list")
+        return []
+    # ─────────────────────────────────────────────────────────────────────────
+
     subq = (
         db.query(
             FinalSignal.ticker,
@@ -372,10 +440,22 @@ def scan_now(db: Session = Depends(get_db)):
        written to DB is fresh (not the stale scheduler value from hours ago).
     2. Signal scan       — SignalEngine.run_scan() reads the newly persisted regime.
 
-    Both phases run in the same request so the toast in the UI reflects the
-    actual regime that was just computed, not a cached one.
+    FIX 2: Both phases are skipped if no holdings exist, returning a clear
+    message instead of crashing on yfinance or signal-engine calls.
     """
     try:
+        # ── FIX 2: Empty-portfolio guard — skip scan entirely ─────────────────
+        if not _holdings_exist(db):
+            return {
+                "status":        "empty",
+                "message":       _EMPTY_PORTFOLIO_MSG,
+                "signals_count": 0,
+                "signals":       [],
+                "regime_label":  "UNKNOWN",
+                "regime_summary": None,
+            }
+        # ─────────────────────────────────────────────────────────────────────
+
         # Phase 1 — always detect regime fresh before scanning signals
         regime_svc = get_regime_service()
         try:
@@ -401,6 +481,7 @@ def scan_now(db: Session = Depends(get_db)):
         )
 
         return {
+            "status":        "success",
             "message":       f"Scan complete — {len(results)} signals generated",
             "signals_count": len(results),
             "signals":       results,

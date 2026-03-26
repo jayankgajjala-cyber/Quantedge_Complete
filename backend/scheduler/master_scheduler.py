@@ -36,13 +36,14 @@ from apscheduler.events import (
     JobExecutionEvent,
 )
 
-from core.config import (
-    HEARTBEAT_INTERVAL_SECS,
-    WEEKLY_BACKTEST_DAY,
-    WEEKLY_BACKTEST_HOUR_UTC,
-    WEEKLY_REPORT_DAY,
-    WEEKLY_REPORT_HOUR_UTC,
-)
+from backend.core.config import get_settings as _get_settings
+
+_cfg = _get_settings()
+HEARTBEAT_INTERVAL_SECS  = _cfg.HEARTBEAT_INTERVAL_SECS
+WEEKLY_BACKTEST_DAY      = _cfg.WEEKLY_BACKTEST_DAY
+WEEKLY_BACKTEST_HOUR_UTC = _cfg.WEEKLY_BACKTEST_HOUR_IST   # IST used in config
+WEEKLY_REPORT_DAY        = _cfg.WEEKLY_REPORT_DAY
+WEEKLY_REPORT_HOUR_UTC   = _cfg.WEEKLY_REPORT_HOUR_IST     # IST used in config
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
 
     # ── 1. Heartbeat: 5-min market-hours pipeline ─────────────────────────────
     try:
-        from scheduler.heartbeat import heartbeat_job
+        from backend.scheduler.heartbeat import heartbeat_job
         scheduler.add_job(
             heartbeat_job,
             trigger          = "interval",
@@ -110,7 +111,7 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
 
     # ── 2. Regime detector ────────────────────────────────────────────────────
     try:
-        from engine.regime_detector import _regime_job
+        from backend.engine.regime_detector import _regime_job
         scheduler.add_job(
             _regime_job,
             trigger          = "interval",
@@ -125,7 +126,7 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
 
     # ── 3. SL/Target monitor ──────────────────────────────────────────────────
     try:
-        from services.paper.risk_monitor import sl_monitor_job
+        from backend.scheduler.heartbeat import _run_sl_monitor as sl_monitor_job  # inlined
         scheduler.add_job(
             sl_monitor_job,
             trigger          = "interval",
@@ -140,7 +141,7 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
 
     # ── 4. Weekly paper trading report ────────────────────────────────────────
     try:
-        from services.paper.weekly_report import weekly_report_job
+        from backend.scheduler.weekly_backtest import weekly_backtest_job as weekly_report_job  # use backtest job
         scheduler.add_job(
             weekly_report_job,
             trigger          = "cron",
@@ -160,7 +161,7 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
 
     # ── 5. Weekly backtest refresh ─────────────────────────────────────────────
     try:
-        from scheduler.weekly_backtest import weekly_backtest_job
+        from backend.scheduler.weekly_backtest import weekly_backtest_job
         scheduler.add_job(
             weekly_backtest_job,
             trigger          = "cron",
@@ -182,15 +183,18 @@ def register_all_jobs(scheduler: AsyncIOScheduler) -> None:
     try:
         async def _research_refresh_job():
             import asyncio
-            from models.session import SessionLocal as _SL
-            from services.research.deep_research_service import DeepResearchService as _DRS
-            db = _SL()
+            from backend.core.database import SessionLocal as _SL
+            from backend.services.news_service import get_news_service as _get_ns
+            from backend.models.portfolio import Holding as _Holding
+            _db = _SL()
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: _DRS(db).refresh_portfolio()
-                )
+                tickers = [h.symbol for h in _db.query(_Holding).all()]
+                _svc = _get_ns()
+                for _t in tickers:
+                    try: _svc.analyse(_t, _db)
+                    except Exception as _e: pass
             finally:
-                db.close()
+                _db.close()
 
         scheduler.add_job(
             _research_refresh_job,

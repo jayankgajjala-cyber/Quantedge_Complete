@@ -8,11 +8,69 @@ are used for local dev; production deployments should override them.
 
 import secrets
 import logging
+import sys
 from functools import lru_cache
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+
+def configure_root_logger(level: int = logging.INFO) -> None:
+    """
+    Configure the root logger so that EVERY log record — including the
+    structured 500-error handler in main.py — includes the source file
+    name and exact line number.
+
+    Format example:
+        2025-06-01 14:22:03,412 [ERROR   ] metrics.py:187 | calculate_metrics |
+        Equity curve build failed: division by zero
+
+    Call this once at the earliest point in startup, before any other
+    module imports logging.  In main.py, replace the existing
+    setup_logging() call with:
+
+        from backend.core.config import configure_root_logger, get_settings
+        cfg = get_settings()
+        configure_root_logger(level=logging.DEBUG if cfg.DEBUG else logging.INFO)
+
+    Formatter fields
+    ----------------
+        %(asctime)s        — timestamp with milliseconds
+        [%(levelname)-8s]  — level name, left-padded to 8 chars
+        %(filename)s       — source filename (no full path)  ← 500 origin
+        :%(lineno)d        — exact line number               ← 500 origin
+        %(funcName)s       — calling function name
+        %(message)s        — the log message body
+    """
+    fmt = (
+        "%(asctime)s "
+        "[%(levelname)-8s] "
+        "%(filename)s:%(lineno)d | "
+        "%(funcName)s | "
+        "%(message)s"
+    )
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Avoid duplicate handlers on uvicorn --reload hot restarts
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+        root.addHandler(handler)
+    else:
+        # Update formatter on every existing StreamHandler so uvicorn's
+        # default handler also emits file + line info
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+
+    # Silence noisy third-party loggers that flood Railway logs at DEBUG level
+    for _noisy in ("yfinance", "urllib3", "httpx", "httpcore", "apscheduler"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 class Settings(BaseSettings):
@@ -139,6 +197,21 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     s = Settings()
 
+    # ── DATABASE_URL normalisation ────────────────────────────────────────────
+    # Railway (and older Heroku/Supabase) provision connection strings with the
+    # scheme `postgres://`.  SQLAlchemy 1.4+ dropped support for that alias and
+    # requires `postgresql://`.  Patch it once here so every part of the app
+    # that calls get_settings() gets the corrected URL without each module
+    # having to remember to do it themselves.
+    if s.DATABASE_URL and s.DATABASE_URL.startswith("postgres://"):
+        normalized = "postgresql://" + s.DATABASE_URL[len("postgres://"):]
+        object.__setattr__(s, "DATABASE_URL", normalized)
+        logger.info(
+            "DATABASE_URL scheme normalised: postgres:// → postgresql:// "
+            "(SQLAlchemy 1.4+ requires the full dialect name)"
+        )
+
+    # ── JWT secret auto-generation ────────────────────────────────────────────
     # Auto-generate JWT secret if not set instead of crashing.
     # A generated key is safe for single-instance deployments — tokens are
     # invalidated on restart, which just means users log in again.

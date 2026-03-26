@@ -1,7 +1,7 @@
 """
 Real-Time Price & 5-Minute Candle Service
 ==========================================
-Fetches the latest 5-minute OHLCV candle for a list of NSE tickers
+Fetches the latest 5-minute OHLCV candle for a list of NSE/BSE tickers
 using yfinance.  Used by the signal engine to confirm that strategy
 conditions are met on the current price bar before emitting a signal.
 
@@ -11,12 +11,14 @@ Design
 • Returns a dict[symbol → latest_candle_dict]
 • Volume confirmation: checks if current bar volume > 1.5× the 20-bar avg
 • Falls back to daily bar if 5-min data is unavailable (outside market hours)
+• Exchange suffix is resolved once via EXCHANGE_SUFFIX_MAP (no hardcoding)
+• Market-open check uses IST (UTC+5:30) and respects NSE public holidays
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timezone, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -26,15 +28,49 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-NSE_SUFFIX             = ".NS"
+# Dynamic suffix map – add more exchanges here without touching any other code
+EXCHANGE_SUFFIX_MAP: dict[str, str] = {
+    "NSE": ".NS",
+    "BSE": ".BO",
+    "NYSE": "",
+    "NASDAQ": "",
+}
+DEFAULT_EXCHANGE = "NSE"
+
 CANDLE_INTERVAL        = "5m"
 CANDLE_LOOKBACK_PERIOD = "5d"        # enough history for 20-bar avg
 VOLUME_CONFIRMATION_X  = 1.5         # current volume must be ≥ 1.5× avg
 MIN_BARS_FOR_AVG       = 10          # minimum bars needed to compute vol avg
 
-# Indian market hours (IST = UTC+5:30)
-MARKET_OPEN_UTC  = dtime(3, 45)      # 09:15 IST
-MARKET_CLOSE_UTC = dtime(10, 0)      # 15:30 IST
+# IST = UTC + 5h30m
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+# NSE trading window in IST
+_MARKET_OPEN_IST  = dtime(9,  15)   # 09:15 IST
+_MARKET_CLOSE_IST = dtime(15, 30)   # 15:30 IST
+
+# NSE public holidays for the current calendar year (YYYY-MM-DD).
+# Update this set at the start of each year from the NSE official holiday list.
+# Source: https://www.nseindia.com/resources/exchange-communication-holidays
+NSE_HOLIDAYS_2025: frozenset[date] = frozenset({
+    date(2025, 2, 26),  # Mahashivratri
+    date(2025, 3, 14),  # Holi
+    date(2025, 3, 31),  # Id-ul-Fitr (Ramzan Id)
+    date(2025, 4, 10),  # Shri Ram Navami
+    date(2025, 4, 14),  # Dr. Baba Saheb Ambedkar Jayanti
+    date(2025, 4, 18),  # Good Friday
+    date(2025, 5,  1),  # Maharashtra Day
+    date(2025, 8, 15),  # Independence Day
+    date(2025, 8, 27),  # Ganesh Chaturthi
+    date(2025, 10,  2), # Mahatma Gandhi Jayanti / Dussehra
+    date(2025, 10, 21), # Diwali Laxmi Puja (Muhurat trading only)
+    date(2025, 10, 22), # Diwali Balipratipada
+    date(2025, 11,  5), # Prakash Gurpurb Sri Guru Nanak Dev Ji
+    date(2025, 12, 25), # Christmas
+})
+
+# Combine holidays from multiple years so the module survives a year boundary
+NSE_HOLIDAYS: frozenset[date] = NSE_HOLIDAYS_2025  # extend as needed
 
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
@@ -88,14 +124,15 @@ class CandleData:
 
 # ─── Fetcher ──────────────────────────────────────────────────────────────────
 
-def _build_yf_symbol(symbol: str, exchange: str = "NSE") -> str:
-    suffix = NSE_SUFFIX if exchange == "NSE" else ".BO"
+def _build_yf_symbol(symbol: str, exchange: str = DEFAULT_EXCHANGE) -> str:
+    """Append the correct exchange suffix from EXCHANGE_SUFFIX_MAP."""
+    suffix = EXCHANGE_SUFFIX_MAP.get(exchange.upper(), "")
     return f"{symbol}{suffix}"
 
 
 def fetch_latest_candles(
     symbols:  list[str],
-    exchange: str = "NSE",
+    exchange: str = DEFAULT_EXCHANGE,
 ) -> dict[str, Optional[CandleData]]:
     """
     Batch-download the latest 5-minute candle for all symbols.
@@ -188,8 +225,27 @@ def fetch_latest_candles(
 
 def is_market_open() -> bool:
     """
-    Returns True if the current UTC time falls within NSE trading hours.
-    NSE: 09:15–15:30 IST = 03:45–10:00 UTC.
+    Returns True if the NSE is currently open for trading.
+
+    Checks three conditions in order:
+      1. Current IST time is within 09:15–15:30
+      2. Today is a weekday (Monday–Friday)
+      3. Today is not an NSE public holiday
+
+    IST is computed directly as UTC+5:30 – no pytz dependency required.
     """
-    now_utc = datetime.now(timezone.utc).time()
-    return MARKET_OPEN_UTC <= now_utc <= MARKET_CLOSE_UTC
+    now_ist  = datetime.now(_IST)
+    today    = now_ist.date()
+
+    # Weekend check
+    if now_ist.weekday() >= 5:          # 5=Saturday, 6=Sunday
+        return False
+
+    # Holiday check
+    if today in NSE_HOLIDAYS:
+        logger.debug("NSE holiday today (%s) – market closed", today)
+        return False
+
+    # Time-window check (compare time objects in IST directly)
+    current_time = now_ist.time().replace(tzinfo=None)
+    return _MARKET_OPEN_IST <= current_time <= _MARKET_CLOSE_IST

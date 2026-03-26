@@ -1,10 +1,19 @@
 """
-backend/core/database.py  — v9.2 (Production-Hardened)
+backend/core/database.py  — v9.3 (Production-Hardened, audited)
 
 FIX 1: Auto-detects DATABASE_URL → PostgreSQL with NullPool.
         Falls back to SQLite + StaticPool for local dev only.
         NullPool is mandatory for Supabase pgbouncer compatibility.
         5-retry startup loop handles Supabase cold-start latency.
+
+AUDIT (v9.3):
+  - Confirmed NullPool is applied unconditionally to all PostgreSQL connections.
+  - NullPool means every SQLAlchemy Session opens a brand-new connection and
+    closes it immediately on Session.close().  This is the only safe pool mode
+    when Supabase uses pgbouncer in transaction-pooling mode (the default).
+  - StaticPool is retained for SQLite local-dev only (single-file, single-thread).
+  - No changes needed to the connection logic — the existing implementation is
+    correct.  This file is re-delivered for deployment confidence.
 """
 
 import logging
@@ -30,7 +39,7 @@ def _build_engine():
     debug  = os.environ.get("DEBUG", "false").lower() == "true"
 
     if db_url and ("postgres" in db_url or "postgresql" in db_url):
-        # FIX 1a: Normalize Heroku/Railway-style "postgres://" prefix
+        # Normalize Heroku/Railway-style "postgres://" prefix
         db_url = db_url.replace("postgres://", "postgresql://", 1)
 
         engine = create_engine(
@@ -106,7 +115,9 @@ def _register_all_models():
     from backend.models import news           # noqa: F401
     from backend.models import paper          # noqa: F401
     from backend.models import alerts         # noqa: F401
-    from backend.models import market_context # noqa: F401
+    from backend.models import market_context  # noqa: F401
+    from backend.models import scheduler_lock  # noqa: F401
+    from backend.models import auth_state      # noqa: F401  — AuthState (OTP / lockout)
 
 
 def init_db() -> None:

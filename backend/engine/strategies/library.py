@@ -35,7 +35,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from engine.indicators.technical import (
+from backend.engine.indicators.technical import (
     adx as calc_adx,
     atr as calc_atr,
     bollinger_bands,

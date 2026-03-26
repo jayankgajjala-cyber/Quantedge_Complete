@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from models.database import DataQuality
+from backend.models.portfolio import DataQuality
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +92,27 @@ class BacktestMetrics:
 def build_equity_curve(
     df:              pd.DataFrame,
     initial_capital: float = 100_000.0,
-    commission_pct:  float = 0.001,       # 0.1% per side (typical Indian broker)
+    commission_pct:  float = 0.001,       # 0.1% per side = 0.2% round-trip
 ) -> tuple[pd.Series, list[TradeRecord]]:
     """
     Simulate a long-only strategy from a signals DataFrame.
+
+    Commission / slippage model
+    ---------------------------
+    A flat 0.1% is deducted on BOTH the entry and exit legs, giving a
+    realistic round-trip cost of 0.2% per trade (covers NSE STT, stamp
+    duty, brokerage, and conservative slippage).
+
+    Without symmetric commission the backtest overstates returns because
+    the capital deployed at entry is too large (no entry friction) while
+    the exit proceeds are still reduced — an asymmetric error that
+    compounds over many trades.
 
     Parameters
     ----------
     df              : DataFrame with 'signal', 'position', 'Close' columns
     initial_capital : starting portfolio value
-    commission_pct  : one-way commission fraction
+    commission_pct  : one-way commission + slippage fraction (default 0.1%)
 
     Returns
     -------
@@ -122,18 +133,18 @@ def build_equity_curve(
         pos   = row.get("position", 0)
 
         if sig == 1 and not in_trade:
-            # Open long
-            commission   = equity * commission_pct
-            shares_held  = (equity - commission) / close
-            entry_price  = close
-            entry_date   = ts
-            in_trade     = True
+            # Open long — deduct entry commission from deployable capital
+            entry_commission = equity * commission_pct
+            shares_held      = (equity - entry_commission) / close
+            entry_price      = close
+            entry_date       = ts
+            in_trade         = True
 
         elif (sig == -1 or (in_trade and pos == 0)) and in_trade:
-            # Close long
-            gross        = shares_held * close
-            commission   = gross * commission_pct
-            equity       = gross - commission
+            # Close long — deduct exit commission from gross proceeds
+            gross           = shares_held * close
+            exit_commission = gross * commission_pct
+            equity          = gross - exit_commission
             trades.append(TradeRecord(
                 entry_date  = entry_date,
                 exit_date   = ts,

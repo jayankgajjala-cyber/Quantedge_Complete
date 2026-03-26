@@ -31,15 +31,15 @@ from typing import Optional
 
 import pandas as pd
 import yfinance as yf
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from engine.indicators.technical import enrich_dataframe
-from engine.metrics import BacktestMetrics, calculate_metrics
-from engine.strategies.library import all_strategy_instances, BaseStrategy
-from models.database import DataQuality, StrategyPerformance
-from models.session import SessionLocal
-from services.data_quality import assess_data_quality
+from backend.engine.indicators.technical import enrich_dataframe
+from backend.engine.metrics import BacktestMetrics, calculate_metrics
+from backend.engine.strategies.library import all_strategy_instances, BaseStrategy
+from backend.models.portfolio import DataQuality
+from backend.models.backtest import StrategyPerformance
+from backend.core.database import SessionLocal
+from backend.services.data_manager import fetch_ohlcv as _fetch_ohlcv_dm  # quality helper
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,16 @@ def run_single_backtest(
             return m
 
         signals = strategy.generate_signals(enriched)
+
+        # ── Look-ahead bias prevention ────────────────────────────────────────
+        # Signals are generated on bar-close data. A trade can only be entered
+        # on the NEXT bar's open, so we shift the signal column forward by 1.
+        # This ensures the backtest never "cheats" by acting on today's close
+        # within the same bar that produced the signal.
+        if "signal" in signals.columns:
+            signals["signal"] = signals["signal"].shift(1)
+        signals = signals.iloc[1:]   # drop the first NaN row introduced by shift
+
         metrics = calculate_metrics(signals, INITIAL_CAPITAL)
 
         return metrics
@@ -164,13 +174,18 @@ def _persist_result(
             "notes":           metrics.notes or "",
         }
 
-        stmt = sqlite_insert(StrategyPerformance).values([row])
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["stock_ticker", "strategy_name"],
-            set_={k: v for k, v in row.items()
-                  if k not in ("stock_ticker", "strategy_name")},
+        # Dialect-agnostic upsert — works on SQLite (dev) and PostgreSQL/Supabase (prod).
+        existing = (
+            db.query(StrategyPerformance)
+            .filter_by(stock_ticker=symbol, strategy_name=strategy.name)
+            .first()
         )
-        db.execute(stmt)
+        if existing:
+            for k, v in row.items():
+                if k not in ("stock_ticker", "strategy_name"):
+                    setattr(existing, k, v)
+        else:
+            db.add(StrategyPerformance(**row))
         db.commit()
 
     except Exception as exc:
@@ -229,8 +244,15 @@ def run_full_backtest(
             skipped_data += len(strategies)
             continue
 
-        # Data quality assessment
-        quality, years, quality_msg = assess_data_quality(df, symbol)
+        # Data quality assessment (inlined — assess_data_quality was removed)
+        days  = (df.index[-1] - df.index[0]).days if not df.empty else 0
+        years = days / 365.25
+        if years >= 10:
+            quality, quality_msg = DataQuality.SUFFICIENT, ""
+        elif years >= 5:
+            quality, quality_msg = DataQuality.INSUFFICIENT, f"INSUFFICIENT DATA: {years:.1f} years"
+        else:
+            quality, quality_msg = DataQuality.LOW_CONFIDENCE, f"INSUFFICIENT DATA: {years:.1f} years"
         logger.info(
             "%s: %.1f years of data → %s", symbol, years, quality.value
         )
@@ -292,7 +314,7 @@ def run_portfolio_backtest(exchange: str = "NSE") -> dict:
     Load all symbols from the Holdings table and run the full backtest.
     Intended to be called from a FastAPI background task.
     """
-    from models.database import Holding
+    from backend.models.portfolio import Holding
 
     db = SessionLocal()
     try:

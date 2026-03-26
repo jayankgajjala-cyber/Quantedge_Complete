@@ -7,7 +7,9 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 
-from models.database import DataQuality, Interval, TradeDirection, TradeStatus
+from backend.models.portfolio import DataQuality
+from backend.models.portfolio import IntervalType as Interval  # renamed
+from backend.models.paper import TradeDirection, TradeStatus
 
 
 # ─── Holdings ─────────────────────────────────────────────────────────────────

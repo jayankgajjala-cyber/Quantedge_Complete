@@ -28,8 +28,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from models.session import SessionLocal
-from scheduler.market_hours import is_market_open, market_status_summary
+from backend.core.database import SessionLocal
+from backend.scheduler.market_hours import is_market_open, market_status_summary
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +101,24 @@ async def heartbeat_job() -> None:
 
 def _refresh_live_prices() -> None:
     """Refresh cached prices for all open paper trade symbols."""
-    from models.database import PaperTrade, TradeStatus
-    from services.paper.live_price import get_live_prices
+    from backend.models.paper import PaperTrade, TradeStatus
+    import yfinance as _yf
     db = SessionLocal()
     try:
         open_trades = db.query(PaperTrade).filter(PaperTrade.status == TradeStatus.OPEN).all()
         if not open_trades:
             return
         symbols = list({t.symbol for t in open_trades})
-        prices  = get_live_prices(symbols)
-        hits    = sum(1 for p in prices.values() if p.valid)
+        prices  = {}
+        for sym in symbols:
+            try:
+                info = _yf.Ticker(f"{sym}.NS").fast_info
+                p = float(info.get("last_price") or info.get("previous_close") or 0)
+                if p > 0:
+                    prices[sym] = p
+            except Exception:
+                pass
+        hits    = len(prices)
         logger.info("[HEARTBEAT] Live prices refreshed: %d/%d symbols", hits, len(symbols))
     finally:
         db.close()
@@ -118,7 +126,7 @@ def _refresh_live_prices() -> None:
 
 def _run_signal_scan() -> list[dict]:
     """Run the Module 4 RegimeAwareSignalEngine scan."""
-    from engine.signals.signal_engine import get_signal_engine
+    from backend.engine.signals.signal_engine import get_signal_engine
     engine  = get_signal_engine()
     results = engine.run_scan()
     return results
@@ -126,7 +134,7 @@ def _run_signal_scan() -> list[dict]:
 
 def _dispatch_alerts(scan_results: list[dict]) -> None:
     """Evaluate scan results and send high-confidence email alerts."""
-    from scheduler.alert_dispatcher import dispatch_alerts_for_scan
+    from backend.scheduler.alert_dispatcher import dispatch_alerts_for_scan
     db = SessionLocal()
     try:
         summary = dispatch_alerts_for_scan(scan_results, db)
@@ -138,19 +146,26 @@ def _dispatch_alerts(scan_results: list[dict]) -> None:
 
 def _refresh_news_sentiment() -> None:
     """Refresh Module 5 research for portfolio holdings (respects 60-min cache)."""
-    from models.database import Holding
-    from services.research.deep_research_service import DeepResearchService
+    from backend.models.portfolio import Holding
+    from backend.services.news_service import get_news_service as _get_news_svc
     db = SessionLocal()
     try:
         holdings = db.query(Holding).all()
         tickers  = [h.symbol for h in holdings]
         if not tickers:
             return
-        svc    = DeepResearchService(db)
-        result = svc.refresh_portfolio()
+        svc = _get_news_svc()
+        refreshed = cached = errors = 0
+        for ticker in tickers:
+            try:
+                svc.analyse(ticker, db)
+                refreshed += 1
+            except Exception as _e:
+                logger.warning("[HEARTBEAT] News refresh failed for %s: %s", ticker, _e)
+                errors += 1
         logger.info(
             "[HEARTBEAT] News refresh: %d updated, %d cached, %d errors",
-            result["refreshed"], result["cached"], result["errors"],
+            refreshed, cached, errors,
         )
     finally:
         db.close()
@@ -158,8 +173,43 @@ def _refresh_news_sentiment() -> None:
 
 def _run_sl_monitor() -> None:
     """Run the Module 7 SL/target risk monitor."""
-    from services.paper.risk_monitor import run_sl_target_monitor
-    summary = run_sl_target_monitor()
+    from backend.core.database import get_db_context as _gdc
+    from backend.models.paper import PaperTrade, TradeStatus, TradeDirection, VirtualLedger, LedgerEntryType
+    from backend.core.config import get_settings as _gs
+    import yfinance as _yf2
+    from datetime import datetime, timezone
+    _cfg2 = _gs()
+    sl_hits = target_hits = 0
+    with _gdc() as _db:
+        open_trades = _db.query(PaperTrade).filter(PaperTrade.status == TradeStatus.OPEN).all()
+        prices = {}
+        for sym in {t.symbol for t in open_trades}:
+            try:
+                info = _yf2.Ticker(f"{sym}.NS").fast_info
+                p = float(info.get("last_price") or info.get("previous_close") or 0)
+                if p > 0: prices[sym] = p
+            except Exception: pass
+        for trade in open_trades:
+            ltp = prices.get(trade.symbol)
+            if not ltp: continue
+            is_buy = trade.direction == TradeDirection.BUY
+            sl_hit = trade.stop_loss and (ltp <= trade.stop_loss if is_buy else ltp >= trade.stop_loss)
+            tg_hit = trade.target and (ltp >= trade.target if is_buy else ltp <= trade.target)
+            reason = "SL_HIT" if sl_hit else ("TARGET_HIT" if tg_hit else None)
+            if not reason: continue
+            exit_p = trade.stop_loss if sl_hit else trade.target
+            trade.exit_price = exit_p; trade.exit_time = datetime.now(timezone.utc)
+            trade.status = TradeStatus.CLOSED
+            trade.pnl = ((exit_p - trade.entry_price) if is_buy else (trade.entry_price - exit_p)) * trade.quantity
+            trade.pnl_pct = trade.pnl / (trade.entry_price * trade.quantity) * 100
+            _db.add(VirtualLedger(trade_id=trade.id, symbol=trade.symbol,
+                entry_type=LedgerEntryType(reason), price=exit_p, quantity=trade.quantity,
+                gross_value=exit_p*trade.quantity, commission=exit_p*trade.quantity*_cfg2.COMMISSION_PCT,
+                net_value=exit_p*trade.quantity*(1-_cfg2.COMMISSION_PCT),
+                realised_pnl=trade.pnl, realised_pnl_pct=trade.pnl_pct, close_reason=reason))
+            if sl_hit: sl_hits += 1
+            else: target_hits += 1
+    summary = {"sl_hits": sl_hits, "target_hits": target_hits}
     if summary.get("sl_hits", 0) or summary.get("target_hits", 0):
         logger.warning(
             "[HEARTBEAT] Risk events — SL: %d, TARGET: %d",
