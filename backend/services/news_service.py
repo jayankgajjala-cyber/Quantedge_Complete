@@ -27,6 +27,7 @@ import logging
 import re
 import statistics
 import time
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from xml.etree import ElementTree
@@ -307,7 +308,6 @@ def _generate_forecast(ticker: str, sentiment_label: str) -> dict:
 
 
 def _parquet_path(symbol: str) -> str:
-    from pathlib import Path
     return str(Path(cfg.PARQUET_CACHE_DIR) / f"{symbol}_10yr.parquet")
 
 

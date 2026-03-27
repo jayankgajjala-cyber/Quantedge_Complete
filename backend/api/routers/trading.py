@@ -182,13 +182,7 @@ def list_holdings(db: Session = Depends(get_db)):
 
         # ── FIX 2: Empty-portfolio guard — stop all downstream API calls ──────
         if not holdings:
-            return {
-                "status":  "empty",
-                "message": (
-                    "No portfolio found; waiting for Zerodha holdings input in CSV file."
-                ),
-                "data": [],
-            }
+            return []
         # ─────────────────────────────────────────────────────────────────────
 
         # Only call yfinance when we actually have holdings to price
@@ -214,7 +208,7 @@ def list_holdings(db: Session = Depends(get_db)):
                 "data_quality":  (h.data_quality.value if hasattr(h.data_quality, "value") else str(h.data_quality)),
                 "uploaded_at":   (h.updated_at.isoformat() if getattr(h, "updated_at", None) else None),
             })
-        return {"status": "success", "data": result}
+        return result
 
     except sa_exc.OperationalError as exc:
         logger.error("list_holdings DB connection error: %s", exc, exc_info=True)

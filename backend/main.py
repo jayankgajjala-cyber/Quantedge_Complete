@@ -228,13 +228,11 @@ def _build_scheduler():
     # ── Weekly P&L report — Saturday 23:30 IST ───────────────────────────────
     async def _weekly_report():
         import asyncio
-        from backend.core.database import get_db_context
-        from backend.services.paper.weekly_report import generate_weekly_report
+        from backend.scheduler.weekly_backtest import run_weekly_backtest_refresh
         try:
-            with get_db_context() as db:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: generate_weekly_report(db)
-                )
+            await asyncio.get_event_loop().run_in_executor(
+                None, run_weekly_backtest_refresh
+            )
         except Exception as exc:
             logger.error("Weekly report failed: %s", exc, exc_info=True)
 
@@ -466,7 +464,7 @@ def _is_scheduler_leader() -> bool:
     import os
     try:
         from backend.core.database import get_db_context
-        from backend.models.scheduler_lock import SchedulerLock  # see models/scheduler_lock.py
+        from backend.models.scheduler_lock import SchedulerLock
         from datetime import datetime, timezone, timedelta
 
         pid      = os.getpid()
