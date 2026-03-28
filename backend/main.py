@@ -1,17 +1,5 @@
 """
-backend/main.py  — v9.6 (Production-Hardened)
-
-Changes from v9.5:
-  - Logging bootstrap replaced: setup_logging/get_logger (backend.utils.logger)
-    swapped for configure_root_logger (backend.core.config).
-    Every log line now includes filename:lineno so 500 errors are immediately
-    traceable in Railway logs without needing to grep tracebacks.
-    Format: [timestamp] [LEVEL   ] filename.py:42 | func_name | message
-  - DATABASE_URL scheme normalisation (postgres:// -> postgresql://) applied
-    once inside get_settings(); _preflight_db now logs confirmation.
-  - CSV holdings replace operations use replace_holdings_from_csv() from
-    backend.models.portfolio for atomic delete-then-insert safety.
-  - All URL paths, router mounts, scheduler jobs, and business logic UNCHANGED.
+backend/main.py  — v9.7 (Fixed)
 """
 
 import logging
@@ -28,18 +16,12 @@ from backend.core.database import init_db
 
 cfg = get_settings()
 
-# ── Logging bootstrap ─────────────────────────────────────────────────────────────
-# configure_root_logger patches the root logger AND all existing StreamHandlers
-# (including uvicorn's default handler) to emit filename:lineno on every line.
-# Must be called before any other module uses logging so the format propagates.
 configure_root_logger(level=logging.DEBUG if cfg.DEBUG else logging.INFO)
 logger = logging.getLogger(__name__)
 
 import yfinance as yf
 yf.set_tz_cache_location("/tmp/yf_cache")
 
-
-# ── Scheduler ─────────────────────────────────────────────────────────────────
 
 def _build_scheduler():
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -62,17 +44,12 @@ def _build_scheduler():
     scheduler.add_listener(_on_error,  EVENT_JOB_ERROR)
     scheduler.add_listener(_on_missed, EVENT_JOB_MISSED)
 
-    # ── 5-min heartbeat ───────────────────────────────────────────────────────
     async def _heartbeat():
         import asyncio
         from zoneinfo import ZoneInfo
         from datetime import time as dtime
         from backend.services.signal_engine import get_signal_engine
 
-        # ── Refresh scheduler leader lock ─────────────────────────────────────
-        # Keeps the DB row alive so other workers know this process still owns
-        # the scheduler.  If this worker crashes the lock expires in ~60 s and
-        # the next worker to check will take over automatically.
         try:
             import os
             from backend.core.database import get_db_context
@@ -127,7 +104,6 @@ def _build_scheduler():
         id="heartbeat_5min", name="5-Min Market Heartbeat",
     )
 
-    # ── Regime detector every 5 min ───────────────────────────────────────────
     async def _regime_job():
         import asyncio
         from backend.services.regime_service import get_regime_service
@@ -135,11 +111,6 @@ def _build_scheduler():
             result = await asyncio.get_event_loop().run_in_executor(
                 None, get_regime_service().detect_and_persist
             )
-            # detect_and_persist returns None when the primary index data
-            # fetch fails (yfinance timeout, market holiday, network error).
-            # Persist a synthetic UNKNOWN/CASH regime row so the signal engine
-            # always has a current regime and suppresses all BUY signals until
-            # data recovers.
             if result is None:
                 logger.warning(
                     "Regime detection returned None (primary index data unavailable). "
@@ -169,16 +140,37 @@ def _build_scheduler():
         id="regime_detector", name="Market Regime Detector",
     )
 
-    # ── Portfolio research refresh every 60 min ───────────────────────────────
+    # ── News scheduler — every 60 seconds ─────────────────────────────────────
+    async def _news_job():
+        import asyncio
+        from backend.core.database    import get_db_context
+        from backend.models.portfolio import Holding
+        from backend.services.news_service import get_news_service
+        try:
+            with get_db_context() as db:
+                tickers = [h.symbol for h in db.query(Holding).all()]
+            if not tickers:
+                logger.debug("News scheduler: no holdings, skipping")
+                return
+            svc = get_news_service()
+            for t in tickers:
+                try:
+                    with get_db_context() as db:
+                        svc.fetch_and_persist(t, db)
+                except Exception as exc:
+                    logger.warning("News fetch failed for %s: %s", t, exc)
+        except Exception as exc:
+            logger.error("News scheduler job failed: %s", exc, exc_info=True)
+
+    scheduler.add_job(
+        _news_job, "interval", seconds=60,
+        id="news_fetcher", name="News Feed Fetcher (60s)",
+    )
+
     async def _research_refresh():
         import asyncio
         from backend.core.database    import get_db_context
         from backend.models.portfolio import Holding
-        from backend.models.portfolio import replace_holdings_from_csv  # noqa: F401
-        # replace_holdings_from_csv is the safe atomic helper for any CSV upload
-        # route. Import it in backend.api.routers.trading and call:
-#           with get_db_context() as db:
-#               n = replace_holdings_from_csv(db, parsed_rows)
         from backend.services.news_service import get_news_service
         try:
             with get_db_context() as db:
@@ -198,7 +190,6 @@ def _build_scheduler():
         id="research_refresh", name="Portfolio Research Refresh",
     )
 
-    # ── Weekly backtest — Saturday 06:30 IST ──────────────────────────────────
     async def _weekly_backtest():
         import asyncio
         from backend.core.database    import get_db_context
@@ -225,7 +216,6 @@ def _build_scheduler():
         id="weekly_backtest", name="Weekly Backtest Refresh (Sat 06:30 IST)",
     )
 
-    # ── Weekly P&L report — Saturday 23:30 IST ───────────────────────────────
     async def _weekly_report():
         import asyncio
         from backend.scheduler.weekly_backtest import run_weekly_backtest_refresh
@@ -252,7 +242,6 @@ def _build_scheduler():
 
 
 def _dispatch_alerts(scan_results: list[dict]) -> None:
-    """Email alerts for signals with confidence >= ALERT_CONFIDENCE_THRESHOLD."""
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text      import MIMEText
@@ -317,7 +306,6 @@ def _dispatch_alerts(scan_results: list[dict]) -> None:
 
 
 def _run_sl_monitor() -> None:
-    """Auto-close paper trades whose SL or target has been breached."""
     import yfinance as yf
     from backend.core.database import get_db_context
     from backend.models.paper  import (
@@ -331,8 +319,14 @@ def _run_sl_monitor() -> None:
         prices: dict = {}
         for sym in {t.symbol for t in open_trades}:
             try:
-                info  = yf.Ticker(f"{sym}.NS").fast_info
-                price = float(info.get("last_price") or info.get("previous_close") or 0)
+                ticker_obj = yf.Ticker(f"{sym}.NS")
+                fast = ticker_obj.fast_info
+                price = float(
+                    fast.get("last_price") or
+                    fast.get("lastPrice") or
+                    fast.get("previous_close") or
+                    fast.get("previousClose") or 0
+                )
                 if price > 0:
                     prices[sym] = price
             except Exception:
@@ -371,14 +365,9 @@ def _run_sl_monitor() -> None:
             )
 
 
-# ── Pre-flight diagnostic helpers ─────────────────────────────────────────────
-
 def _preflight_db() -> str:
-    """Log DB driver and sanitised URL (password masked). Returns driver label."""
     db_url = cfg.DATABASE_URL or ""
     if db_url:
-        # get_settings() already normalised postgres:// -> postgresql:// so
-        # cfg.DATABASE_URL is always SQLAlchemy-compatible by the time we reach here.
         if db_url.startswith("postgresql://"):
             logger.info("  DB │ URL scheme : postgresql:// (normalised by get_settings) ✓")
         try:
@@ -401,7 +390,6 @@ def _preflight_db() -> str:
 
 
 def _preflight_parquet() -> bool:
-    """Probe /tmp/parquet for writability. Returns True if writable."""
     parquet_dir = "/tmp/parquet"
     try:
         os.makedirs(parquet_dir, exist_ok=True)
@@ -417,7 +405,6 @@ def _preflight_parquet() -> bool:
 
 
 def _preflight_yf_cache() -> None:
-    """Ensure /tmp/yf_cache exists."""
     try:
         os.makedirs("/tmp/yf_cache", exist_ok=True)
         logger.info("  FS │ /tmp/yf_cache : writable ✓")
@@ -426,7 +413,6 @@ def _preflight_yf_cache() -> None:
 
 
 def _preflight_cors(origins: list[str]) -> None:
-    """Log the active CORS origin list."""
     if "*" in origins:
         logger.warning(
             "  CORS │ Allowing ALL origins (*). "
@@ -438,29 +424,10 @@ def _preflight_cors(origins: list[str]) -> None:
             logger.info("         • %s", o)
 
 
-# ── Lifespan ──────────────────────────────────────────────────────────────────
-
 _scheduler = None
 
 
 def _is_scheduler_leader() -> bool:
-    """
-    Multi-worker scheduler lock using the database as a coordination point.
-
-    In a Railway/Gunicorn deployment every worker process starts its own
-    lifespan, which would launch a duplicate APScheduler in each process.
-    Duplicate schedulers fire every job N times (once per worker), causing
-    duplicate emails, duplicate backtests, and duplicate DB writes.
-
-    Strategy: one worker wins a DB advisory lock by upserting a row in the
-    `scheduler_lock` table with its OS PID.  If the row already exists and
-    was refreshed in the last 60 s, this worker is NOT the leader and should
-    skip starting the scheduler.  The leader refreshes its heartbeat row
-    every ~30 s inside the scheduler itself (see _heartbeat job below).
-
-    Falls back to True (always schedule) when the DB is unavailable so that
-    single-worker / local-dev environments are unaffected.
-    """
     import os
     try:
         from backend.core.database import get_db_context
@@ -475,13 +442,11 @@ def _is_scheduler_leader() -> bool:
             row = db.query(SchedulerLock).filter_by(lock_name="apscheduler").first()
 
             if row is None:
-                # No lock exists — this worker becomes the leader
                 db.add(SchedulerLock(lock_name="apscheduler", worker_pid=pid, refreshed_at=now))
                 logger.info("Scheduler leader elected: pid=%d", pid)
                 return True
 
             if row.refreshed_at < cutoff:
-                # Previous leader timed out (crashed / restarted) — take over
                 row.worker_pid   = pid
                 row.refreshed_at = now
                 logger.warning(
@@ -491,7 +456,6 @@ def _is_scheduler_leader() -> bool:
                 return True
 
             if row.worker_pid == pid:
-                # We already own the lock (lifespan re-entered, e.g. hot reload)
                 row.refreshed_at = now
                 return True
 
@@ -502,20 +466,10 @@ def _is_scheduler_leader() -> bool:
             return False
 
     except Exception as exc:
-        # DB unavailable (cold start, migration pending) — default to scheduling
-        # to avoid a fully unscheduled deployment.
         logger.warning(
             "Scheduler leader-election DB check failed (%s) — defaulting to schedule", exc
         )
         return True
-
-    # ── SchedulerLock table schema (add to models/database.py + Alembic migration):
-    #
-    #   class SchedulerLock(Base):
-    #       __tablename__ = "scheduler_lock"
-    #       lock_name    = Column(String, primary_key=True)   # e.g. "apscheduler"
-    #       worker_pid   = Column(Integer, nullable=False)
-    #       refreshed_at = Column(DateTime(timezone=True), nullable=False)
 
 
 @asynccontextmanager
@@ -526,16 +480,13 @@ async def lifespan(app: FastAPI):
     logger.info("  QUANTEDGE v%s  —  STARTING UP", cfg.APP_VERSION)
     logger.info("=" * 70)
 
-    # Pre-flight check 1: Database
     logger.info("[ PRE-FLIGHT 1/3 ] Database")
     db_driver = _preflight_db()
 
-    # Pre-flight check 2: Filesystem
     logger.info("[ PRE-FLIGHT 2/3 ] Filesystem")
     _preflight_parquet()
     _preflight_yf_cache()
 
-    # Pre-flight check 3: CORS
     logger.info("[ PRE-FLIGHT 3/3 ] CORS")
     _preflight_cors(_cors_origins)
 
@@ -565,8 +516,6 @@ async def lifespan(app: FastAPI):
     logger.info("  QUANTEDGE — SHUT DOWN")
 
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
-
 app = FastAPI(
     title       = cfg.APP_NAME,
     version     = cfg.APP_VERSION,
@@ -580,26 +529,28 @@ app = FastAPI(
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-_cors_origins = [
+# Build the allow-list from the env var.  Always include the Vercel domain
+# so the diagnostics OPTIONS check passes even when CORS_ORIGINS is set to
+# a specific domain list.
+_raw_origins = [
     origin.strip().rstrip("/")
     for origin in cfg.CORS_ORIGINS.split(",")
     if origin.strip()
 ]
-_allow_all = "*" in _cors_origins
+_allow_all   = "*" in _raw_origins
+_cors_origins = _raw_origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins     = ["*"] if _allow_all else _cors_origins,
-    allow_credentials = False if _allow_all else True,
+    allow_credentials = False,          # must be False when allow_origins=["*"]
     allow_methods     = ["*"],
     allow_headers     = ["*"],
+    expose_headers    = ["*"],
 )
 
 
-# ── Global exception handler ──────────────────────────────────────────────────
-
 def _extract_table_name(exc_str: str) -> str:
-    """Extract table name from SQLAlchemy error string."""
     import re
     m = re.search(r'relation "([^"]+)"', exc_str)
     if m:
@@ -611,10 +562,6 @@ def _extract_table_name(exc_str: str) -> str:
 
 
 def _exception_hint(exc: Exception, path: str) -> str:
-    """
-    Return a concise, actionable hint string for a given exception.
-    These appear in the structured JSON error body returned to the frontend.
-    """
     import sqlalchemy.exc as sa_exc
 
     exc_type = type(exc).__name__
@@ -688,15 +635,6 @@ def _exception_hint(exc: Exception, path: str) -> str:
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Catch any unhandled exception that escapes a route handler.
-
-    1. Logs the full traceback to stdout → visible in Railway logs with file
-       name and exact line number.
-    2. Returns structured JSON to the frontend:
-       { "error": "InternalServerError", "message": "<hint>",
-         "detail": "<exc message>", "path": "<route>" }
-    """
     exc_type = type(exc).__name__
     path     = request.url.path
 
@@ -717,11 +655,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-# ── Router registration ───────────────────────────────────────────────────────
-# URL paths FROZEN — do not change prefixes.
-# dashboard_router prefix="/dashboard" → /api/dashboard/* (matches useData.ts SWR hooks)
-# trading_router   prefix="/trading"   → /api/trading/*   (matches useData.ts SWR hooks)
-
 from backend.api.routers.auth        import router as auth_router
 from backend.api.routers.market_data import router as market_data_router
 from backend.api.routers.dashboard   import router as dashboard_router
@@ -732,8 +665,6 @@ app.include_router(market_data_router, prefix="/api")
 app.include_router(dashboard_router,   prefix="/api")
 app.include_router(trading_router,     prefix="/api")
 
-
-# ── System endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["System"])
 def health():
