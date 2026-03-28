@@ -1,27 +1,7 @@
 """
-backend/api/routers/trading.py
-================================
-All trading data endpoints — all JWT-protected.
-
-Every endpoint:
-  - Wraps logic in try/except
-  - Returns structured errors: { "status": "error", "message": "..." }
-  - Never silently swallows exceptions
-
-POST /api/trading/portfolio/upload          → Zerodha CSV ingest
-GET  /api/trading/portfolio/holdings        → list all holdings with live P&L
-POST /api/trading/paper/open                → open paper trade with ledger
-POST /api/trading/paper/{id}/close          → close with P&L
-GET  /api/trading/paper/trades              → list trades (with live MTM)
-GET  /api/trading/paper/budget              → current month budget status
-POST /api/trading/paper/allocate            → calculate suggested allocation
-GET  /api/trading/backtest/run/{ticker}     → run backtest for one ticker
-
-FIXES (v9.3):
-  - FIX 1: upload_portfolio now DELETES all existing holdings before inserting
-            new rows so sold stocks are correctly removed on each CSV re-upload.
-  - FIX 2: list_holdings returns a structured empty-state response when the
-            holdings table is empty — no yfinance calls are made in that case.
+backend/api/routers/trading.py — v9.8 (Fixed)
+- _fetch_price: robust fast_info key resolution for NSE tickers
+- LTP fallback: tries lastPrice, last_price, previousClose, previous_close
 """
 
 import io
@@ -63,7 +43,6 @@ _REQUIRED_COLS = {"instrument", "qty.", "avg. cost"}
 
 
 def _err(msg: str, code: int = 400):
-    """Return a structured error JSONResponse."""
     return JSONResponse(
         status_code=code,
         content={"status": "error", "message": msg},
@@ -73,11 +52,36 @@ def _err(msg: str, code: int = 400):
 # ── Live price helpers ────────────────────────────────────────────────────────
 
 def _fetch_price(symbol: str) -> tuple[str, Optional[float]]:
+    """
+    Fetch LTP for an NSE ticker via yfinance fast_info.
+    Tries multiple key names because yfinance changes them across versions.
+    Falls back to 1d history close if fast_info yields nothing.
+    """
     try:
-        info  = yf.Ticker(f"{symbol}.NS").fast_info
-        price = float(info.get("last_price") or info.get("previous_close") or 0)
-        return symbol, price if price > 0 else None
-    except Exception:
+        ticker_obj = yf.Ticker(f"{symbol}.NS")
+        fi = ticker_obj.fast_info
+
+        # fast_info is a dict-like object; key names vary by yfinance version
+        price = None
+        for key in ("last_price", "lastPrice", "previous_close", "previousClose",
+                    "regularMarketPrice", "regular_market_price"):
+            try:
+                val = fi[key] if hasattr(fi, "__getitem__") else getattr(fi, key, None)
+                if val and float(val) > 0:
+                    price = float(val)
+                    break
+            except (KeyError, TypeError, AttributeError):
+                continue
+
+        # Fallback: pull last close from 5-day history
+        if not price:
+            hist = ticker_obj.history(period="5d", interval="1d", auto_adjust=True)
+            if not hist.empty:
+                price = float(hist["Close"].dropna().iloc[-1])
+
+        return symbol, price if price and price > 0 else None
+    except Exception as exc:
+        logger.debug("_fetch_price failed for %s: %s", symbol, exc)
         return symbol, None
 
 
@@ -87,7 +91,7 @@ def _batch_live_prices(symbols: list[str], max_workers: int = 8) -> dict[str, fl
         return prices
     with ThreadPoolExecutor(max_workers=min(max_workers, len(symbols))) as pool:
         futures = {pool.submit(_fetch_price, sym): sym for sym in symbols}
-        for fut in as_completed(futures, timeout=20):
+        for fut in as_completed(futures, timeout=25):
             try:
                 sym, price = fut.result()
                 if price is not None:
@@ -104,11 +108,6 @@ async def upload_portfolio(
     file: UploadFile = File(..., description="Zerodha holdings CSV"),
     db:   Session    = Depends(get_db),
 ):
-    """
-    FIX 1: Deletes ALL existing holdings before inserting the new CSV rows.
-    This ensures stocks that were sold and no longer appear in the export
-    are properly removed from the database — not left as stale rows.
-    """
     try:
         raw = await file.read()
         if not raw:
@@ -130,13 +129,9 @@ async def upload_portfolio(
 
         df = df.dropna(subset=["instrument"])
 
-        # ── FIX 1: Wipe old holdings so sold stocks are not retained ──────────
         deleted_count = db.query(Holding).delete(synchronize_session=False)
         logger.info("upload_portfolio: deleted %d stale holding rows before re-import", deleted_count)
-        # Flush the deletes so the INSERT below doesn't hit unique-constraint
-        # conflicts on symbol if the same ticker reappears in the new CSV.
         db.flush()
-        # ─────────────────────────────────────────────────────────────────────
 
         imported = skipped = 0
         for _, row in df.iterrows():
@@ -147,7 +142,6 @@ async def upload_portfolio(
                 if qty <= 0 or avg_p <= 0:
                     skipped += 1
                     continue
-                # Always insert fresh rows (old rows were deleted above)
                 h = Holding(symbol=symbol, quantity=qty, average_price=avg_p)
                 db.add(h)
                 imported += 1
@@ -172,20 +166,12 @@ async def upload_portfolio(
 
 @router.get("/portfolio/holdings", summary="List all holdings with live P&L")
 def list_holdings(db: Session = Depends(get_db)):
-    """
-    FIX 2: Returns a structured empty-state payload when the holdings table is
-    empty. No yfinance API calls are made in that case, preventing cascading
-    errors on a fresh deploy before any CSV has been uploaded.
-    """
     try:
         holdings = db.query(Holding).order_by(Holding.symbol).all()
 
-        # ── FIX 2: Empty-portfolio guard — stop all downstream API calls ──────
         if not holdings:
             return []
-        # ─────────────────────────────────────────────────────────────────────
 
-        # Only call yfinance when we actually have holdings to price
         live_prices = _batch_live_prices([h.symbol for h in holdings])
 
         result = []
@@ -521,11 +507,6 @@ def allocate(payload: AllocateIn, db: Session = Depends(get_db)):
 @router.get("/backtest/run/{ticker}",
             summary="Run 10-year backtest for a single ticker (all 8 strategies)")
 def run_backtest(ticker: str):
-    """
-    Cold cache: ~15–45s (fetches 10yr OHLCV + runs 8 strategies).
-    Warm cache: ~5s.
-    Frontend uses apiSlow (120s timeout) for this endpoint.
-    """
     try:
         svc    = get_quant_service()
         result = svc.run_backtest_for_ticker(ticker.upper())

@@ -1,40 +1,18 @@
 """
-backend/api/routers/dashboard.py
-===================================
-All dashboard data endpoints — all JWT-protected.
-
-Router prefix: /dashboard
-Mounted in main.py as: app.include_router(dashboard_router, prefix="/api")
-
-Resulting URLs:
-GET  /api/dashboard/              → summary: regime + signals + budget
-GET  /api/dashboard/regime        → latest market regime snapshot  (matches useLatestRegime)
-GET  /api/dashboard/signals       → latest FinalSignals            (matches useLatestSignals)
-GET  /api/dashboard/signals/{ticker} → signal history for one ticker
-POST /api/dashboard/scan-now      → force immediate signal scan    (matches triggerScanNow)
-GET  /api/dashboard/research/{ticker} → full news + sentiment + forecast
-GET  /api/dashboard/research/{ticker}/articles → raw news articles
-GET  /api/dashboard/notifications → recent alert dispatch log      (matches useNotifications)
-GET  /api/dashboard/leaderboard   → top strategies by Sharpe       (matches useLeaderboard)
-
-FIXES (v9.3):
-  - FIX 1: /regime now returns HTTP 503 (not 404) on DB errors and 200 + an
-            empty-state payload when no regime row exists yet, so the frontend
-            never crashes with "j.reduce is not a function" on a null response.
-  - FIX 2: get_dashboard, get_latest_signals, and scan_now all check for an
-            empty holdings table first.  If empty they short-circuit with a
-            structured payload and skip all yfinance / signal-scan calls.
-  - FIX 3: _holdings_exist() helper centralises the empty-portfolio check so
-            it is reused consistently across all affected endpoints.
+backend/api/routers/dashboard.py — v9.8 (Fixed)
+- scan-now uses BackgroundTasks to avoid frontend timeout
+- Added /scan-status polling endpoint
+- Added /backtests endpoint for backtest results tab
 """
 
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
 import sqlalchemy.exc as sa_exc
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
@@ -62,6 +40,9 @@ router = APIRouter(
 _EMPTY_PORTFOLIO_MSG = (
     "No portfolio found; waiting for Zerodha holdings input in CSV file."
 )
+
+# In-memory scan job store (keyed by scan_id)
+_scan_jobs: dict[str, dict] = {}
 
 
 # ─── Pydantic out-schemas ─────────────────────────────────────────────────────
@@ -146,6 +127,32 @@ class LeaderboardEntry(BaseModel):
     data_quality:  str = "UNKNOWN"
 
 
+class BacktestResult(BaseModel):
+    stock_ticker:     str
+    strategy_name:    str
+    sharpe_ratio:     Optional[float] = None
+    cagr:             Optional[float] = None
+    win_rate:         Optional[float] = None
+    max_drawdown:     Optional[float] = None
+    sortino_ratio:    Optional[float] = None
+    profit_factor:    Optional[float] = None
+    total_trades:     Optional[int]   = None
+    winning_trades:   Optional[int]   = None
+    losing_trades:    Optional[int]   = None
+    total_return_pct: Optional[float] = None
+    annual_volatility:Optional[float] = None
+    calmar_ratio:     Optional[float] = None
+    avg_win:          Optional[float] = None
+    avg_loss:         Optional[float] = None
+    backtest_start:   Optional[datetime] = None
+    backtest_end:     Optional[datetime] = None
+    years_of_data:    Optional[float] = None
+    data_quality:     str = "SUFFICIENT"
+    initial_capital:  Optional[float] = None
+    ran_at:           Optional[datetime] = None
+    notes:            Optional[str]   = None
+
+
 class NewsArticleOut(BaseModel):
     title:           str
     source_name:     str
@@ -160,15 +167,10 @@ class NewsArticleOut(BaseModel):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _holdings_exist(db: Session) -> bool:
-    """
-    FIX 2 helper: Returns True only when at least one Holding row exists.
-    Uses a cheap EXISTS-style scalar query (no full table scan).
-    """
     return db.query(Holding.id).limit(1).scalar() is not None
 
 
 def _signal_to_out(r: FinalSignal) -> SignalOut:
-    """Safely serialise a FinalSignal ORM row to SignalOut."""
     confirmations: Optional[dict] = None
     if getattr(r, "source_confirmations_json", None):
         try:
@@ -220,12 +222,7 @@ def _signal_to_out(r: FinalSignal) -> SignalOut:
 
 @router.get("/", summary="Aggregated dashboard payload")
 def get_dashboard(db: Session = Depends(get_db)):
-    """
-    FIX 2: Returns a structured empty-state payload when no holdings exist,
-    skipping all signal queries and yfinance calls.
-    """
     try:
-        # ── FIX 2: Empty-portfolio guard ─────────────────────────────────────
         if not _holdings_exist(db):
             return {
                 "status":             "empty",
@@ -241,7 +238,6 @@ def get_dashboard(db: Session = Depends(get_db)):
                 "bias_message":       "",
                 "last_scan_at":       None,
             }
-        # ─────────────────────────────────────────────────────────────────────
 
         regime = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
@@ -316,12 +312,6 @@ def get_dashboard(db: Session = Depends(get_db)):
 
 @router.get("/regime", summary="Latest Nifty 50 market regime snapshot")
 def get_regime(db: Session = Depends(get_db)):
-    """
-    FIX 1: Returns a structured 200 empty-state payload (not a 404) when no
-    regime row exists yet.  This prevents the frontend JS from crashing with
-    "j.reduce is not a function" when it tries to iterate over a null/error
-    response body — the frontend receives a well-formed object in all cases.
-    """
     try:
         row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
     except sa_exc.OperationalError as exc:
@@ -343,7 +333,6 @@ def get_regime(db: Session = Depends(get_db)):
             ),
         )
 
-    # ── FIX 1: Return a safe empty-state object instead of raising 404 ───────
     if not row:
         return {
             "status":         "empty",
@@ -353,7 +342,6 @@ def get_regime(db: Session = Depends(get_db)):
             "regime_summary": None,
             "timestamp":      None,
         }
-    # ─────────────────────────────────────────────────────────────────────────
 
     return RegimeOut(
         id               = row.id,
@@ -377,11 +365,9 @@ def get_latest_signals(
     limit:          int           = Query(50, ge=1, le=200),
     db:             Session       = Depends(get_db),
 ):
-    # ── FIX 2: Empty-portfolio guard — return [] immediately ─────────────────
     if not _holdings_exist(db):
         logger.info("get_latest_signals: no holdings found, returning empty list")
         return []
-    # ─────────────────────────────────────────────────────────────────────────
 
     subq = (
         db.query(
@@ -431,75 +417,139 @@ def get_ticker_signals(
     return [_signal_to_out(r) for r in rows]
 
 
-@router.post("/scan-now", status_code=status.HTTP_200_OK,
-             summary="Trigger an immediate signal scan + fresh regime detection")
-def scan_now(db: Session = Depends(get_db)):
-    """
-    Two-phase synchronous pipeline:
-    1. Regime detection  — calls RegimeService.detect_and_persist() so the regime
-       written to DB is fresh (not the stale scheduler value from hours ago).
-    2. Signal scan       — SignalEngine.run_scan() reads the newly persisted regime.
+def _run_scan_background(scan_id: str) -> None:
+    """Background worker — runs regime detection then signal scan."""
+    from backend.core.database import get_db_context
+    from backend.models.regime import MarketRegime
+    from sqlalchemy import desc
 
-    FIX 2: Both phases are skipped if no holdings exist, returning a clear
-    message instead of crashing on yfinance or signal-engine calls.
-    """
+    _scan_jobs[scan_id]["status"] = "running"
+
     try:
-        # ── FIX 2: Empty-portfolio guard — skip scan entirely ─────────────────
-        if not _holdings_exist(db):
-            return {
-                "status":        "empty",
-                "message":       _EMPTY_PORTFOLIO_MSG,
+        with get_db_context() as db:
+            has_holdings = db.query(Holding.id).limit(1).scalar() is not None
+
+        if not has_holdings:
+            _scan_jobs[scan_id].update({
+                "status":        "done",
                 "signals_count": 0,
-                "signals":       [],
                 "regime_label":  "UNKNOWN",
                 "regime_summary": None,
-            }
-        # ─────────────────────────────────────────────────────────────────────
+                "message":       _EMPTY_PORTFOLIO_MSG,
+            })
+            return
 
-        # Phase 1 — always detect regime fresh before scanning signals
-        regime_svc = get_regime_service()
         try:
+            regime_svc = get_regime_service()
             new_regime = regime_svc.detect_and_persist()
             logger.info(
-                "scan-now: regime freshly detected → %s",
+                "bg-scan: regime → %s",
                 new_regime.regime_label.value if new_regime else "unknown",
             )
-        except Exception as regime_exc:
-            # Non-fatal: regime detection can fail (e.g. market closed, yfinance down)
-            # Signal scan will fall back to reading the last persisted regime from DB
-            logger.warning("scan-now: regime detection failed (non-fatal): %s", regime_exc)
+        except Exception as exc:
+            logger.warning("bg-scan: regime detection failed (non-fatal): %s", exc)
 
-        # Phase 2 — run signal scan (reads regime from DB, now fresh from phase 1)
         engine  = get_signal_engine()
         results = engine.run_scan()
 
-        # Return fresh regime label for the toast in the frontend
-        regime_row = (
-            db.query(MarketRegime)
-            .order_by(desc(MarketRegime.timestamp))
-            .first()
-        )
+        with get_db_context() as db:
+            regime_row = db.query(MarketRegime).order_by(desc(MarketRegime.timestamp)).first()
 
-        return {
-            "status":        "success",
-            "message":       f"Scan complete — {len(results)} signals generated",
+        _scan_jobs[scan_id].update({
+            "status":        "done",
             "signals_count": len(results),
-            "signals":       results,
             "regime_label":  regime_row.regime_label.value if regime_row else "UNKNOWN",
             "regime_summary": regime_row.regime_summary if regime_row else None,
-        }
-    except sa_exc.OperationalError as exc:
-        logger.error("scan-now DB error: %s", exc, exc_info=True)
-        raise HTTPException(
-            503,
-            detail=(
-                "Database connection lost during scan. "
-                "Check DATABASE_URL in Railway environment variables."
-            ),
-        )
+            "message":       f"Scan complete — {len(results)} signals generated",
+        })
+
     except Exception as exc:
-        logger.error("on-demand scan failed: %s", exc, exc_info=True)
-        raise HTTPException(500, detail=f"Scan failed: {exc}. Check Railway backend logs for details.")
+        logger.error("bg-scan failed: %s", exc, exc_info=True)
+        _scan_jobs[scan_id].update({
+            "status":  "error",
+            "message": f"Scan failed: {exc}",
+        })
+
+
+@router.post("/scan-now", status_code=status.HTTP_202_ACCEPTED,
+             summary="Trigger an immediate signal scan (non-blocking)")
+def scan_now(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Immediately returns a scan_id.
+    Poll GET /api/dashboard/scan-status/{scan_id} for completion.
+    This prevents frontend 30s timeout on slow scans.
+    """
+    if not _holdings_exist(db):
+        return {
+            "status":        "empty",
+            "message":       _EMPTY_PORTFOLIO_MSG,
+            "signals_count": 0,
+            "signals":       [],
+            "regime_label":  "UNKNOWN",
+            "regime_summary": None,
+        }
+
+    scan_id = str(uuid.uuid4())
+    _scan_jobs[scan_id] = {"status": "pending", "started_at": datetime.utcnow().isoformat()}
+    background_tasks.add_task(_run_scan_background, scan_id)
+
+    return {"status": "accepted", "scan_id": scan_id}
+
+
+@router.get("/scan-status/{scan_id}", summary="Poll background scan job status")
+def scan_status(scan_id: str):
+    job = _scan_jobs.get(scan_id)
+    if not job:
+        raise HTTPException(404, f"Scan job '{scan_id}' not found")
+    return job
+
+
+@router.get("/backtests", response_model=list[BacktestResult],
+            summary="All backtest results grouped by ticker")
+def get_backtests(
+    ticker: Optional[str] = Query(None, description="Filter by ticker symbol"),
+    limit:  int           = Query(200, ge=1, le=500),
+    db:     Session       = Depends(get_db),
+):
+    q = db.query(StrategyPerformance)
+    if ticker:
+        q = q.filter(StrategyPerformance.stock_ticker == ticker.upper())
+    rows = (
+        q.order_by(
+            StrategyPerformance.stock_ticker,
+            desc(StrategyPerformance.sharpe_ratio),
+        )
+        .limit(limit)
+        .all()
+    )
+    return [
+        BacktestResult(
+            stock_ticker      = r.stock_ticker,
+            strategy_name     = r.strategy_name,
+            sharpe_ratio      = r.sharpe_ratio,
+            cagr              = r.cagr,
+            win_rate          = r.win_rate,
+            max_drawdown      = r.max_drawdown,
+            sortino_ratio     = r.sortino_ratio,
+            profit_factor     = r.profit_factor,
+            total_trades      = r.total_trades,
+            winning_trades    = r.winning_trades,
+            losing_trades     = r.losing_trades,
+            total_return_pct  = r.total_return_pct,
+            annual_volatility = r.annual_volatility,
+            calmar_ratio      = r.calmar_ratio,
+            avg_win           = r.avg_win,
+            avg_loss          = r.avg_loss,
+            backtest_start    = r.backtest_start,
+            backtest_end      = r.backtest_end,
+            years_of_data     = r.years_of_data,
+            data_quality      = r.data_quality.value if hasattr(r.data_quality, "value") else str(r.data_quality),
+            initial_capital   = r.initial_capital,
+            ran_at            = r.ran_at,
+            notes             = r.notes,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/research/{ticker}", response_model=ResearchOut,
@@ -571,12 +621,6 @@ def get_news_articles(
     limit:  int     = Query(30, ge=1, le=100),
     db:     Session = Depends(get_db),
 ):
-    """
-    Returns persisted NewsArticle rows ordered latest-first.
-    Articles are written by NewsService.analyse() when /research/{ticker} is hit.
-    Returns [] (not 404) if no articles exist yet — frontend calls /research first
-    which triggers ingestion, then calls /articles.
-    """
     rows = (
         db.query(NewsArticleModel)
         .filter(NewsArticleModel.ticker == ticker.upper())
@@ -603,12 +647,6 @@ def get_notifications(
     limit: int     = Query(20, ge=1, le=100),
     db:    Session = Depends(get_db),
 ):
-    """
-    Returns the most recent entries from alert_dispatch_log — real alerts
-    that the scheduler fired (signal emails, SL hits, regime changes).
-    Used by the Header notification dropdown to replace hardcoded static data.
-    Returns [] when no alerts have been dispatched yet.
-    """
     rows = (
         db.query(AlertDispatchLog)
         .order_by(desc(AlertDispatchLog.sent_at))
@@ -641,7 +679,6 @@ def get_leaderboard(
     q = db.query(StrategyPerformance).filter(
         StrategyPerformance.sharpe_ratio.isnot(None)
     )
-    # By default only return SUFFICIENT data quality rows; pass all_qualities=true for full table
     if not all_qualities:
         q = q.filter(StrategyPerformance.data_quality == DataQuality.SUFFICIENT)
 

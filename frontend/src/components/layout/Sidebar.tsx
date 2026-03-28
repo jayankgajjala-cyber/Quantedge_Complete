@@ -13,13 +13,14 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 
 const NAV = [
-  { href: "/portfolio",    label: "Portfolio",      icon: Briefcase,    desc: "Holdings & P&L" },
-  { href: "/signals",      label: "Market Signals", icon: Zap,          desc: "Live regime signals" },
-  { href: "/research",     label: "News Research",  icon: Newspaper,    desc: "AI sentiment feed" },
-  { href: "/paper-trading",label: "Paper Trading",  icon: FlaskConical, desc: "Simulated trades" },
-  { href: "/leaderboard",  label: "Leaderboard",    icon: Trophy,       desc: "Strategy rankings" },
-  { href: "/settings",     label: "Settings",       icon: Settings,     desc: "Configuration" },
-  { href: "/debug",       label: "Diagnostics",    icon: Activity,     desc: "Check system health" },
+  { href: "/portfolio",    label: "Portfolio",        icon: Briefcase,  desc: "Holdings & P&L" },
+  { href: "/signals",      label: "Market Signals",   icon: Zap,        desc: "Live regime signals" },
+  { href: "/research",     label: "News Research",    icon: Newspaper,  desc: "AI sentiment feed" },
+  { href: "/paper-trading",label: "Paper Trading",    icon: FlaskConical, desc: "Simulated trades" },
+  { href: "/leaderboard",  label: "Leaderboard",      icon: Trophy,     desc: "Strategy rankings" },
+  { href: "/backtests",    label: "Backtest Results", icon: BarChart3,  desc: "Strategy performance" },
+  { href: "/settings",     label: "Settings",         icon: Settings,   desc: "Configuration" },
+  { href: "/debug",        label: "Diagnostics",      icon: Activity,   desc: "Check system health" },
 ];
 
 export default function Sidebar() {
@@ -79,7 +80,6 @@ export default function Sidebar() {
                   <div className="text-[10px] text-muted-foreground mt-0.5 truncate">{desc}</div>
                 </div>
               )}
-              {/* Tooltip on collapsed */}
               {collapsed && (
                 <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-card border border-border rounded-lg text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 shadow-xl">
                   {label}

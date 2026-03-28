@@ -40,12 +40,11 @@ export default function SignalsPage() {
   async function handleScan() {
     setScanning(true);
     setScanError("");
-    setScanMsg("Detecting market regime…");
+    setScanMsg("Queuing scan…");
     try {
-      setScanMsg("Running signal scan across all holdings… (ETA: ~30–60 seconds)");
-      const res = await triggerScanNow();
+      const res = await triggerScanNow((msg) => setScanMsg(msg));
       setScanMsg("");
-      toast.success(`✅ Scan complete — ${res.signals_count} signals generated`, {
+      toast.success(`✅ Scan complete — ${res.signals_count ?? 0} signals generated`, {
         description: res.regime_label ? `Current regime: ${res.regime_label}` : undefined,
         duration: 5000,
       });
@@ -64,7 +63,6 @@ export default function SignalsPage() {
   return (
     <div className="space-y-5 animate-fade-in">
 
-      {/* Scan status bar */}
       {scanning && scanMsg && (
         <div className="bg-primary/8 border border-primary/20 rounded-xl px-4 py-2.5 flex items-center gap-2.5 text-xs">
           <Loader2 size={12} className="animate-spin text-primary shrink-0" />
@@ -72,7 +70,6 @@ export default function SignalsPage() {
         </div>
       )}
 
-      {/* Scan error */}
       {scanError && (
         <ErrorBanner
           title="Signal scan failed"
@@ -82,7 +79,6 @@ export default function SignalsPage() {
         />
       )}
 
-      {/* Dashboard fetch error */}
       {dashError && !dashLoading && (
         <ErrorBanner
           title="Failed to load dashboard data"
@@ -91,7 +87,6 @@ export default function SignalsPage() {
         />
       )}
 
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-display font-bold text-xl">Market Signals</h1>
@@ -110,7 +105,6 @@ export default function SignalsPage() {
         </ActionButton>
       </div>
 
-      {/* Regime panel */}
       {regime && badge && (
         <div className={cn(
           "rounded-2xl border p-4 flex gap-5 items-center flex-wrap",
@@ -146,7 +140,6 @@ export default function SignalsPage() {
         </div>
       )}
 
-      {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {dashLoading ? (
           [...Array(4)].map((_, i) => <Skeleton key={i} className="h-20 rounded-2xl" />)
@@ -155,34 +148,36 @@ export default function SignalsPage() {
             <StatCard label="Buy Signals"  value={String(dashboard?.total_buy_signals  ?? 0)} trend="up"      icon={<TrendingUp size={15} />} glow />
             <StatCard label="Sell Signals" value={String(dashboard?.total_sell_signals ?? 0)} trend="down"    icon={<TrendingDown size={15} />} />
             <StatCard label="Hold Signals" value={String(dashboard?.total_hold_signals ?? 0)} trend="neutral" icon={<Activity size={15} />} />
-            <StatCard label="Regime Conf"  value={dashboard ? `${(dashboard.regime_confidence * 100).toFixed(0)}%` : "—"} trend="neutral" icon={<BarChart3 size={15} />} />
+            <StatCard label="Regime Conf"  value={dashboard ? `${((dashboard.regime_confidence ?? 0) * 100).toFixed(0)}%` : "—"} trend="neutral" icon={<BarChart3 size={15} />} />
           </>
         )}
       </div>
 
-      {/* Bias warning */}
-      {dashboard?.bias_warning && (
-        <div className="bg-gold/5 border border-gold/30 rounded-2xl p-4 flex gap-3">
-          <Zap size={14} className="text-gold shrink-0 mt-0.5" />
-          <p className="text-xs text-gold/80">{dashboard.bias_message}</p>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_400px] gap-5">
-        {/* Signals list */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-4">
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <Tabs tabs={FILTER_TABS} active={filter} onChange={setFilter} />
+          <div className="flex items-center gap-2">
+            <Tabs
+              tabs={FILTER_TABS.map((t) => ({
+                key: t.key,
+                label: (
+                  <span className="flex items-center gap-1">
+                    {t.icon}
+                    {t.label}
+                  </span>
+                ),
+              }))}
+              active={filter}
+              onChange={setFilter}
+            />
             <button
-              onClick={() => { mutateSigs(); mutateDash(); }}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => { mutateDash(); mutateSigs(); }}
+              className="ml-auto text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-lg hover:bg-muted/50"
             >
-              <RefreshCw size={11} />
+              <RefreshCw size={12} />
             </button>
           </div>
 
-          {/* Signals fetch error */}
-          {sigsError && !sigsLoading && (
+          {sigsError && (
             <ErrorBanner
               title="Failed to load signals"
               message={getErrorMessage(sigsError)}
@@ -191,83 +186,43 @@ export default function SignalsPage() {
           )}
 
           {sigsLoading ? (
-            <LoadingOverlay
-              message="Loading latest signals…"
-              eta="~3 seconds"
-            />
+            <div className="space-y-2">
+              {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-28 rounded-2xl" />)}
+            </div>
           ) : !signals?.length ? (
             <Empty
-              icon={<Zap size={32} />}
+              icon={<Zap size={20} />}
               title="No signals yet"
-              description='Click "Force Scan" to run a fresh signal scan, or wait for the 5-minute auto-scheduler'
+              description={
+                filter === "all"
+                  ? "Upload your portfolio CSV then click Force Scan to generate signals."
+                  : `No ${filter} signals found. Try changing the filter.`
+              }
             />
           ) : (
-            <div className="space-y-3">
-              {signals.map((sig: FinalSignal) => (
-                <SignalCard key={sig.id} signal={sig} onSelectTicker={setChartTicker} />
+            <div className="space-y-2">
+              {signals.map((sig) => (
+                <SignalCard
+                  key={sig.id}
+                  signal={sig}
+                  onClick={() => setChartTicker(sig.ticker === chartTicker ? null : sig.ticker)}
+                  active={chartTicker === sig.ticker}
+                />
               ))}
             </div>
           )}
         </div>
 
-        {/* Chart panel */}
-        <div className="space-y-3">
+        <div className="hidden lg:block">
           {chartTicker ? (
-            <>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <BarChart3 size={13} className="text-muted-foreground" />
-                  <span className="text-sm font-semibold">{chartTicker}</span>
-                </div>
-                <button
-                  onClick={() => setChartTicker(null)}
-                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  Clear ×
-                </button>
-              </div>
-              <CandlestickChart ticker={chartTicker} showEMA showBB showVolume height={420} />
-            </>
+            <div className="sticky top-4">
+              <CandlestickChart ticker={chartTicker} />
+            </div>
           ) : (
-            <div className="h-64 rounded-2xl border border-border border-dashed flex items-center justify-center">
-              <div className="text-center">
-                <BarChart3 size={24} className="text-muted-foreground/30 mx-auto mb-2" />
-                <p className="text-xs text-muted-foreground">Click any ticker to view chart</p>
-              </div>
+            <div className="h-64 rounded-2xl border border-border/40 flex items-center justify-center text-muted-foreground text-xs">
+              Click any ticker to view chart
             </div>
           )}
-
-          {dashboard?.top_signals?.length ? (
-            <Card>
-              <CardHeader>
-                <span className="text-xs font-semibold flex items-center gap-1.5">
-                  <TrendingUp size={12} className="text-bull" /> Top Buy Signals
-                </span>
-              </CardHeader>
-              <CardContent className="p-0">
-                {dashboard.top_signals.slice(0, 5).map((s: any, i: number) => (
-                  <button
-                    key={s.ticker}
-                    onClick={() => setChartTicker(s.ticker)}
-                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors border-b border-border/40 last:border-0 text-left"
-                  >
-                    <span className="text-[10px] text-muted-foreground w-4">#{i + 1}</span>
-                    <div className="w-7 h-7 rounded-lg bg-bull/10 border border-bull/20 flex items-center justify-center">
-                      <span className="text-bull text-[9px] font-bold">{s.ticker.slice(0, 2)}</span>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-semibold">{s.ticker}</div>
-                      <div className="text-[9px] text-muted-foreground truncate">{s.selected_strategy}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs font-bold text-bull">{s.confidence.toFixed(0)}%</div>
-                      <div className="text-[9px] text-muted-foreground">conf</div>
-                    </div>
-                  </button>
-                ))}
-              </CardContent>
-            </Card>
-          ) : null}
         </div>
       </div>
     </div>

@@ -1,22 +1,8 @@
 """
-backend/services/news_service.py
-===================================
-NewsService: Multi-source news aggregation, FinBERT sentiment, BART summary.
-
-Pipeline per ticker:
-  1. Check 60-min DB cache (NewsAnalysis.is_cache_valid + cache_expires_at)
-  2. Fetch from NewsAPI + Google News RSS + Yahoo Finance scraper
-  3. Deduplicate by SHA-256 URL hash; sort latest-first
-  4. Score each headline with ProsusAI/finbert (keyword fallback if no API key)
-  5. Detect conflicts: std_dev(scores) ≥ 1.0 → [NEWS CONFLICT DETECTED]
-  6. Generate 3-bullet summary via facebook/bart-large-cnn
-  7. Run 12-24 month forecast with sklearn.LinearRegression
-  8. Persist NewsAnalysis with cache_expires_at = now + 3600s
-
-Insufficient coverage rule:
-  If no articles are found: insufficient_coverage=True,
-  coverage_message = "Insufficient news coverage for reliable sentiment analysis."
-  No fake scores are emitted.
+backend/services/news_service.py — v9.8 (Fixed)
+- Added fetch_and_persist() for the 60s news scheduler job
+- NewsAPI key validation before request
+- Google News and Yahoo fetcher hardened
 """
 
 from __future__ import annotations
@@ -93,13 +79,22 @@ def _safe_dt(raw: str) -> datetime:
 
 def _fetch_newsapi(ticker: str) -> list[Article]:
     if not cfg.NEWS_API_KEY:
+        logger.debug("NewsAPI key not configured, skipping")
         return []
     try:
         resp = requests.get(NEWSAPI_URL, params={
-            "q": f'"{ticker}"', "language": "en",
-            "sortBy": "publishedAt", "pageSize": 15,
+            "q": f'"{ticker}" NSE India stock',
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": 15,
             "apiKey": cfg.NEWS_API_KEY,
         }, timeout=10)
+        if resp.status_code == 401:
+            logger.warning("NewsAPI: invalid API key")
+            return []
+        if resp.status_code == 426:
+            logger.warning("NewsAPI: plan upgrade required")
+            return []
         resp.raise_for_status()
         articles = []
         for item in resp.json().get("articles", []):
@@ -110,6 +105,7 @@ def _fetch_newsapi(ticker: str) -> list[Article]:
                 item.get("description",""), url,
                 _safe_dt(item.get("publishedAt",""))
             ))
+        logger.info("NewsAPI: fetched %d articles for %s", len(articles), ticker)
         return articles
     except Exception as exc:
         logger.warning("NewsAPI fetch failed for %s: %s", ticker, exc)
@@ -118,8 +114,9 @@ def _fetch_newsapi(ticker: str) -> list[Article]:
 
 def _fetch_google_news(ticker: str) -> list[Article]:
     try:
-        time.sleep(1.0)
-        url  = GOOGLE_RSS.format(q=requests.utils.quote(f"{ticker} stock NSE India"))
+        time.sleep(0.5)
+        query = requests.utils.quote(f"{ticker} NSE India stock")
+        url  = GOOGLE_RSS.format(q=query)
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         articles = []
@@ -135,6 +132,7 @@ def _fetch_google_news(ticker: str) -> list[Article]:
                 re.sub(r"<[^>]+>","", item.findtext("description") or ""),
                 link, _safe_dt(item.findtext("pubDate") or "")
             ))
+        logger.info("Google News: fetched %d articles for %s", len(articles), ticker)
         return articles
     except Exception as exc:
         logger.warning("Google News fetch failed for %s: %s", ticker, exc)
@@ -143,7 +141,7 @@ def _fetch_google_news(ticker: str) -> list[Article]:
 
 def _fetch_yahoo(ticker: str) -> list[Article]:
     try:
-        time.sleep(1.0)
+        time.sleep(0.5)
         resp = requests.get(YAHOO_URL.format(sym=f"{ticker}{NSE_SUFFIX}"),
                             headers=HEADERS, timeout=10)
         resp.raise_for_status()
@@ -160,6 +158,7 @@ def _fetch_yahoo(ticker: str) -> list[Article]:
             if len(text) < 10: continue
             if not href.startswith("http"): href = f"https://finance.yahoo.com{href}"
             articles.append(Article(ticker, "YAHOO_FINANCE", text, "", href, now))
+        logger.info("Yahoo Finance: fetched %d articles for %s", len(articles), ticker)
         return articles
     except Exception as exc:
         logger.warning("Yahoo Finance fetch failed for %s: %s", ticker, exc)
@@ -167,7 +166,6 @@ def _fetch_yahoo(ticker: str) -> list[Article]:
 
 
 def fetch_all_news(ticker: str) -> list[Article]:
-    """Aggregate, deduplicate, sort latest-first (index[0] = newest)."""
     raw: list[Article] = []
     raw.extend(_fetch_newsapi(ticker))
     raw.extend(_fetch_google_news(ticker))
@@ -256,7 +254,6 @@ def generate_summary(articles: list[Article], ticker: str) -> list[str]:
         while len(bullets) < 3:
             bullets.append("• Monitor closely for further developments.")
         return bullets
-    # Extractive fallback
     bullets = [f"• {a.title[:120]}" for a in articles[:3]]
     while len(bullets) < 3:
         bullets.append("• Additional analysis pending.")
@@ -315,9 +312,44 @@ def _parquet_path(symbol: str) -> str:
 
 class NewsService:
 
+    def fetch_and_persist(self, ticker: str, db: Session) -> int:
+        """
+        Lightweight fetch used by the 60s scheduler job.
+        Only fetches raw articles and persists new ones — skips full sentiment
+        analysis to keep each run fast.  Returns count of new articles inserted.
+        """
+        articles = fetch_all_news(ticker)
+        if not articles:
+            logger.debug("fetch_and_persist: no articles for %s", ticker)
+            return 0
+
+        new_count = 0
+        for art in articles:
+            exists = db.query(NewsArticle).filter(NewsArticle.url_hash == art.url_hash).first()
+            if not exists:
+                lbl, sc = score_sentiment(f"{art.title}. {art.description}")
+                db.add(NewsArticle(
+                    url_hash=art.url_hash, ticker=ticker,
+                    source_name=NewsSource(art.source),
+                    title=art.title[:1000], description=art.description[:2000],
+                    url=art.url[:2000], published_at=art.published_at,
+                    sentiment_label=SentimentLabel(lbl.upper()) if lbl.upper() in ("POSITIVE","NEGATIVE","NEUTRAL") else SentimentLabel.NEUTRAL,
+                    sentiment_score=sc, analysed_at=datetime.utcnow(),
+                ))
+                new_count += 1
+
+        if new_count:
+            try:
+                db.commit()
+                logger.info("fetch_and_persist: %d new articles for %s", new_count, ticker)
+            except Exception as exc:
+                db.rollback()
+                logger.warning("fetch_and_persist commit failed for %s: %s", ticker, exc)
+
+        return new_count
+
     def analyse(self, ticker: str, db: Session) -> NewsAnalysis:
         """Full pipeline with 60-min cache."""
-        # Cache check
         cached = (
             db.query(NewsAnalysis)
               .filter(NewsAnalysis.ticker == ticker,
@@ -333,7 +365,6 @@ class NewsService:
         logger.info("Running news analysis for %s (cache miss)", ticker)
         articles = fetch_all_news(ticker)
 
-        # Sentiment scoring
         scored = []
         for art in articles:
             lbl, sc = score_sentiment(f"{art.title}. {art.description}")
@@ -351,7 +382,6 @@ class NewsService:
         elif avg < -0.15:     lbl_agg = SentimentLabel.NEGATIVE
         else:                 lbl_agg = SentimentLabel.NEUTRAL
 
-        # Persist articles
         for art, lbl, sc in scored:
             exists = db.query(NewsArticle).filter(NewsArticle.url_hash == art.url_hash).first()
             if not exists:
@@ -364,7 +394,6 @@ class NewsService:
                     sentiment_score=sc, analysed_at=datetime.utcnow(),
                 ))
 
-        # Invalidate old cache
         db.query(NewsAnalysis).filter(NewsAnalysis.ticker == ticker).update({"is_cache_valid": False})
 
         row = NewsAnalysis(
@@ -406,11 +435,6 @@ class NewsService:
         analysis:     NewsAnalysis,
         db:           Session,
     ) -> dict:
-        """
-        THE HANDSHAKE: Apply sentiment override to a Module 4 FinalSignal.
-        Rule 1: sentiment < -0.6 AND BUY  → HOLD / CAUTION: High Negative News
-        Rule 2: sentiment > +0.6 AND HOLD → WATCH: Improving Sentiment
-        """
         result        = dict(signal_dict)
         score         = analysis.avg_sentiment_score or 0.0
         orig_signal   = signal_dict.get("signal", "HOLD")

@@ -1,9 +1,5 @@
 /**
  * useData.ts — SWR hooks + imperative async helpers
- *
- * SWR hooks surface { data, error, isLoading, mutate } for every endpoint.
- * The `error` field lets pages render inline ErrorBanner instead of silent empties.
- * Imperative helpers (triggerScanNow, runBacktest) are used by buttons.
  */
 import useSWR from "swr";
 import { fetcher, api, apiSlow } from "@/lib/api";
@@ -59,8 +55,6 @@ export function useHoldings() {
 }
 
 // ── Research ──────────────────────────────────────────────────────────────────
-// ETA note: first-time analysis triggers FinBERT + BART (~20–40s).
-// Cache is 60 min so subsequent loads are instant.
 export function useResearch(ticker: string | null) {
   return useSWR<FullResearch>(
     ticker ? `/dashboard/research/${ticker}` : null,
@@ -70,8 +64,6 @@ export function useResearch(ticker: string | null) {
 }
 
 // ── News Articles ─────────────────────────────────────────────────────────────
-// Gated on researchTicker === ticker so articles aren't fetched before
-// NewsService.analyse() has run for the current ticker.
 export function useNews(ticker: string | null, researchTicker?: string | null) {
   const ready = ticker && researchTicker === ticker;
   return useSWR<NewsArticle[]>(
@@ -87,6 +79,14 @@ export function useLeaderboard(allQualities = true) {
   return useSWR<StrategyResult[]>(url, fetcher, {
     refreshInterval: REFRESH_5M,
   });
+}
+
+// ── Backtests ─────────────────────────────────────────────────────────────────
+export function useBacktests(ticker?: string) {
+  const url = ticker
+    ? `/dashboard/backtests?ticker=${encodeURIComponent(ticker)}`
+    : "/dashboard/backtests";
+  return useSWR<any[]>(url, fetcher, { refreshInterval: REFRESH_1H });
 }
 
 // ── Paper Trades ──────────────────────────────────────────────────────────────
@@ -133,20 +133,47 @@ export function useNotifications() {
 // ── Imperative helpers ────────────────────────────────────────────────────────
 
 /**
- * POST /api/dashboard/scan-now
- * Phase 1: detect_and_persist() fresh regime
- * Phase 2: run full signal scan
- * Returns { signals_count, regime_label, regime_summary }
+ * POST /api/dashboard/scan-now  →  202 Accepted { scan_id }
+ * Then polls GET /api/dashboard/scan-status/{scan_id} every 3s until done.
+ * Resolves with the final status payload (signals_count, regime_label …).
  */
-export async function triggerScanNow() {
-  const { data } = await api.post("/dashboard/scan-now");
-  return data;
+export async function triggerScanNow(
+  onProgress?: (msg: string) => void,
+  timeoutMs = 120_000,
+): Promise<any> {
+  const { data: accepted } = await api.post("/dashboard/scan-now");
+
+  // Short-circuit: empty portfolio or immediate result
+  if (accepted.status === "empty" || accepted.status === "success") {
+    return accepted;
+  }
+
+  const { scan_id } = accepted;
+  if (!scan_id) return accepted;
+
+  onProgress?.("Scan queued — running regime detection…");
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3_000));
+    try {
+      const { data: job } = await api.get(`/dashboard/scan-status/${scan_id}`);
+      if (job.status === "done" || job.status === "error") {
+        if (job.status === "error") throw new Error(job.message || "Scan failed");
+        return job;
+      }
+      if (job.status === "running") onProgress?.("Running signal scan across holdings…");
+    } catch (err: any) {
+      // ignore transient poll errors, keep polling
+      if (err?.response?.status === 404) throw err;
+    }
+  }
+  throw new Error("Scan timed out — check Railway backend logs.");
 }
 
 /**
  * GET /api/trading/backtest/run/{ticker}
  * Uses 120s timeout — backtest fetches 10yr data + runs 8 strategies.
- * ETA: ~15–45s per ticker on cold cache, ~5s on warm cache.
  */
 export async function runBacktest(ticker: string) {
   const { data } = await apiSlow.get(`/trading/backtest/run/${ticker}`);
