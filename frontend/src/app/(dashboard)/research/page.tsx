@@ -1,428 +1,565 @@
 "use client";
-import { useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useState, useEffect, useRef } from "react";
 import {
-  Newspaper, Search, AlertTriangle, TrendingUp, TrendingDown,
-  Minus, Sparkles, BarChart3, RefreshCw, ExternalLink, Clock,
-  Loader2, WifiOff,
+  Newspaper, Globe, Briefcase, BarChart3, TrendingUp, TrendingDown,
+  Minus, Clock, ExternalLink, RefreshCw, Loader2, AlertTriangle,
+  ChevronDown, ChevronUp, Activity,
 } from "lucide-react";
-import { useResearch, useNews, useInception } from "@/hooks/useData";
-import { getErrorMessage } from "@/lib/api";
-import { cn, sentimentColor, timeAgo, regimeBadge } from "@/lib/utils";
+import { api, getErrorMessage } from "@/lib/api";
+import { useHoldings, useBacktests } from "@/hooks/useData";
+import { cn, sentimentColor, timeAgo } from "@/lib/utils";
 import {
-  Card, CardHeader, CardContent, Badge, Skeleton, Empty,
-  ErrorBanner, LoadingOverlay,
+  Card, CardHeader, CardContent, Badge, Empty, ErrorBanner,
 } from "@/components/ui";
-import CandlestickChart from "@/components/charts/CandlestickChart";
-import InceptionBanner from "@/components/signals/InceptionBanner";
-import type { NewsArticle } from "@/types";
+import type { NewsArticle, Holding } from "@/types";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const NIFTY_50 = [
-  "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","SBIN","WIPRO",
-  "AXISBANK","KOTAKBANK","LT","BAJFINANCE","MARUTI","TATAMOTORS","HCLTECH","SUNPHARMA",
+  "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","SBIN","WIPRO","AXISBANK",
+  "KOTAKBANK","LT","BAJFINANCE","MARUTI","TATAMOTORS","HCLTECH","SUNPHARMA",
+  "NESTLEIND","HINDUNILVR","ASIANPAINT","BAJAJFINSV","ADANIPORTS",
+  "TITAN","ULTRACEMCO","POWERGRID","NTPC","ONGC","COALINDIA","JSWSTEEL",
+  "GRASIM","INDUSINDBK","HINDALCO",
 ];
 
-function SentimentDot({ score }: { score: number | null }) {
-  if (score == null) return <span className="w-2 h-2 rounded-full bg-muted inline-block" />;
-  const color = score > 0.3 ? "bg-bull" : score < -0.3 ? "bg-bear" : "bg-gold";
-  return <span className={cn("w-2 h-2 rounded-full inline-block", color)} />;
+const NIFTY_500_EXTRA = [
+  "BANKBARODA","CANBK","UNIONBANK","IDFCFIRSTB","FEDERALBNK",
+  "MUTHOOTFIN","CHOLAFIN","PNB","LICHSGFIN",
+  "DRREDDY","CIPLA","DIVISLAB","BIOCON","AUROPHARMA",
+  "TATAPOWER","ADANIGREEN","ADANIENT","ADANITRANS",
+  "ZOMATO","NYKAA","PAYTM","POLICYBZR",
+  "IRCTC","HAL","BEL","BHEL","CONCOR",
+  "PIDILITIND","BERGEPAINT","KANSAINER",
+  "VOLTAS","HAVELLS","CROMPTON","WHIRLPOOL",
+  "TATACOMM","BHARTIARTL","IDEA","MTNL",
+];
+
+const GLOBAL_QUERIES = [
+  "US Federal Reserve interest rates",
+  "China economy slowdown impact India",
+  "crude oil prices OPEC",
+  "dollar index DXY emerging markets",
+  "global recession risk 2025",
+  "India GDP growth forecast",
+  "FII DII flows Indian market",
+];
+
+const SECTOR_IMPACT_MAP: Record<string, string[]> = {
+  "crude oil": ["Oil & Gas", "Paints", "Aviation", "Chemicals"],
+  "interest rate": ["Banking", "NBFCs", "Real Estate", "Auto"],
+  "dollar": ["IT", "Pharma", "Metals", "Oil & Gas"],
+  "china": ["Metals", "Chemicals", "Electronics", "Auto"],
+  "recession": ["IT", "Metals", "Auto", "Capital Goods"],
+  "inflation": ["FMCG", "Banking", "Consumer Durables"],
+  "fii": ["Banking", "IT", "Auto", "Financials"],
+  "monsoon": ["FMCG", "Agro", "Rural Finance", "Fertilizers"],
+  "gdp": ["Banking", "Infrastructure", "Capital Goods", "Auto"],
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+interface ArticleWithTicker extends NewsArticle {
+  ticker?: string;
 }
 
-function ScoreBar({ score }: { score: number | null }) {
-  if (score == null) return null;
-  const pct   = ((score + 1) / 2) * 100;
-  const color = score > 0.3 ? "bg-bull" : score < -0.3 ? "bg-bear" : "bg-gold";
+function getSectorImpact(title: string, description: string | null): string[] {
+  const text = `${title} ${description ?? ""}`.toLowerCase();
+  const sectors = new Set<string>();
+  Object.entries(SECTOR_IMPACT_MAP).forEach(([keyword, sectorList]) => {
+    if (text.includes(keyword)) sectorList.forEach((s) => sectors.add(s));
+  });
+  return Array.from(sectors).slice(0, 4);
+}
+
+function sentimentBadgeClass(label: string | null) {
+  if (label === "POSITIVE") return "bg-bull/10 text-bull border-bull/20";
+  if (label === "NEGATIVE") return "bg-bear/10 text-bear border-bear/20";
+  return "bg-gold/10 text-gold border-gold/20";
+}
+
+function sentimentIcon(label: string | null, score: number | null) {
+  if (label === "POSITIVE" || (score ?? 0) > 0.2) return <TrendingUp size={11} className="text-bull" />;
+  if (label === "NEGATIVE" || (score ?? 0) < -0.2) return <TrendingDown size={11} className="text-bear" />;
+  return <Minus size={11} className="text-gold" />;
+}
+
+function avgSentiment(articles: ArticleWithTicker[]) {
+  const scored = articles.filter((a) => a.sentiment_score != null);
+  if (!scored.length) return null;
+  return scored.reduce((s, a) => s + (a.sentiment_score ?? 0), 0) / scored.length;
+}
+
+function SentimentMeter({ articles }: { articles: ArticleWithTicker[] }) {
+  const avg = avgSentiment(articles);
+  if (avg == null) return null;
+  const pos = articles.filter((a) => (a.sentiment_score ?? 0) > 0.1).length;
+  const neg = articles.filter((a) => (a.sentiment_score ?? 0) < -0.1).length;
+  const neu = articles.length - pos - neg;
+  const label = avg > 0.15 ? "Bullish" : avg < -0.15 ? "Bearish" : "Neutral";
+  const color = avg > 0.15 ? "text-bull" : avg < -0.15 ? "text-bear" : "text-gold";
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-[9px] text-muted-foreground font-mono w-10 text-right">
-        {score.toFixed(3)}
-      </span>
-      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden relative">
-        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-border" />
-        <div
-          className={cn("absolute top-0 h-full rounded-full", color)}
-          style={{ left: score >= 0 ? "50%" : `${pct}%`, width: `${Math.abs(score) * 50}%` }}
-        />
+    <div className="flex items-center gap-4 flex-wrap">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] text-muted-foreground uppercase tracking-widest">Sentiment</span>
+        <span className={cn("text-sm font-bold font-mono", color)}>
+          {avg >= 0 ? "+" : ""}{avg.toFixed(3)}
+        </span>
+        <span className={cn("text-[10px] font-semibold", color)}>{label}</span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className="text-bull">▲ {pos} positive</span>
+        <span className="text-muted-foreground">· {neu} neutral ·</span>
+        <span className="text-bear">▼ {neg} negative</span>
       </div>
     </div>
   );
 }
 
-export default function ResearchPage() {
-  const router  = useRouter();
-  const params  = useSearchParams();
-  const [ticker, setTicker] = useState<string>(params.get("ticker") || "RELIANCE");
-  const [input,  setInput]  = useState(ticker);
+function ArticleCard({ article, showTicker, showSectors }: {
+  article: ArticleWithTicker;
+  showTicker?: boolean;
+  showSectors?: boolean;
+}) {
+  const sectors = showSectors ? getSectorImpact(article.title, article.description) : [];
+  return (
+    <div className="bg-card border border-border/60 rounded-xl p-3.5 hover:border-primary/20 transition-all group">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 shrink-0">{sentimentIcon(article.sentiment_label, article.sentiment_score)}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start gap-2 justify-between">
+            <p className="text-xs font-semibold text-foreground leading-snug line-clamp-2 group-hover:text-primary transition-colors">
+              {article.title}
+            </p>
+            {article.url && (
+              <a href={article.url} target="_blank" rel="noopener noreferrer"
+                className="shrink-0 text-muted-foreground hover:text-primary transition-colors">
+                <ExternalLink size={10} />
+              </a>
+            )}
+          </div>
+          {article.description && (
+            <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">{article.description}</p>
+          )}
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            {showTicker && article.ticker && (
+              <span className="text-[9px] font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded">
+                {article.ticker}
+              </span>
+            )}
+            <span className="text-[9px] text-muted-foreground uppercase tracking-wide">
+              {article.source_name?.replace("_", " ")}
+            </span>
+            <span className="text-[9px] text-muted-foreground flex items-center gap-1">
+              <Clock size={8} />{timeAgo(article.published_at)}
+            </span>
+            {article.sentiment_label && (
+              <span className={cn("text-[9px] font-semibold border px-1.5 py-0.5 rounded", sentimentBadgeClass(article.sentiment_label))}>
+                {article.sentiment_label}
+              </span>
+            )}
+            {sectors.length > 0 && (
+              <div className="flex gap-1 flex-wrap ml-1">
+                {sectors.map((s) => (
+                  <span key={s} className="text-[9px] bg-muted/60 text-muted-foreground px-1.5 py-0.5 rounded border border-border/40">
+                    {s}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-  const {
-    data: research,
-    isLoading: resLoading,
-    error: resError,
-    mutate: mutateRes,
-  } = useResearch(ticker);
+function SectionHeader({
+  icon, title, subtitle, count, loading, onRefresh, expanded, onToggle,
+}: {
+  icon: React.ReactNode; title: string; subtitle: string;
+  count: number; loading?: boolean;
+  onRefresh: () => void; expanded: boolean; onToggle: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 cursor-pointer" onClick={onToggle}>
+      <div className="w-8 h-8 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <h2 className="font-display font-bold text-sm">{title}</h2>
+          <Badge variant="neutral">{count} articles</Badge>
+          {loading && <Loader2 size={11} className="animate-spin text-muted-foreground" />}
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-0.5">{subtitle}</p>
+      </div>
+      <button
+        onClick={(e) => { e.stopPropagation(); onRefresh(); }}
+        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
+      >
+        <RefreshCw size={11} />
+      </button>
+      {expanded ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
+    </div>
+  );
+}
 
-  // Only fetch articles after research for THIS ticker has loaded (prevents race condition)
-  const {
-    data: news,
-    isLoading: newsLoading,
-    error: newsError,
-  } = useNews(ticker, research?.ticker);
+// ── Backtest-driven recommendation ───────────────────────────────────────────
 
-  const { data: inception } = useInception(ticker);
+function useBacktestReco(ticker: string, sentimentAvg: number | null) {
+  const { data: backtests } = useBacktests(ticker);
+  if (!backtests?.length) return null;
+  const best = [...backtests].sort((a, b) => (b.sharpe_ratio ?? -99) - (a.sharpe_ratio ?? -99))[0];
+  const sharpe = best?.sharpe_ratio ?? 0;
+  const cagr   = best?.cagr ?? 0;
+  const sent   = sentimentAvg ?? 0;
 
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    const t = input.trim().toUpperCase();
-    if (!t) return;
-    setTicker(t);
-    router.push(`/research?ticker=${t}`, { scroll: false });
+  if (sharpe >= 1.0 && sent > 0.1 && cagr > 5)  return { action: "BUY",        color: "text-bull",           reason: `Sharpe ${sharpe.toFixed(2)} + positive sentiment` };
+  if (sharpe >= 0.5 && sent >= -0.1)             return { action: "ACCUMULATE", color: "text-emerald-400",    reason: `Moderate Sharpe ${sharpe.toFixed(2)}, neutral-positive news` };
+  if (sharpe >= 0.5 && sent < -0.1)              return { action: "HOLD",       color: "text-gold",           reason: `Good strategy but negative news sentiment` };
+  if (sharpe < 0.5  && sent < -0.1)              return { action: "SELL",       color: "text-bear",           reason: `Weak Sharpe ${sharpe.toFixed(2)} + negative sentiment` };
+  return { action: "HOLD", color: "text-gold", reason: `Insufficient signal strength` };
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
+export default function NewsResearchPage() {
+  const { data: holdings } = useHoldings();
+  const holdingTickers = (holdings ?? []).map((h: Holding) => h.symbol);
+
+  // Section expand state
+  const [secA, setSecA] = useState(true);
+  const [secB, setSecB] = useState(true);
+  const [secC, setSecC] = useState(true);
+
+  // Articles state
+  const [indexArticles,   setIndexArticles]   = useState<ArticleWithTicker[]>([]);
+  const [holdingArticles, setHoldingArticles] = useState<ArticleWithTicker[]>([]);
+  const [globalArticles,  setGlobalArticles]  = useState<ArticleWithTicker[]>([]);
+
+  const [loadA, setLoadA] = useState(false);
+  const [loadB, setLoadB] = useState(false);
+  const [loadC, setLoadC] = useState(false);
+  const [errA,  setErrA]  = useState("");
+  const [errB,  setErrB]  = useState("");
+  const [errC,  setErrC]  = useState("");
+
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+
+  // ── Fetch helpers ──────────────────────────────────────────────────────────
+
+  async function fetchArticlesForTickers(tickers: string[]): Promise<ArticleWithTicker[]> {
+    const results: ArticleWithTicker[] = [];
+    // Fetch in batches of 5 to avoid hammering backend
+    const batch = tickers.slice(0, 15);
+    await Promise.allSettled(
+      batch.map(async (ticker) => {
+        try {
+          const { data } = await api.get(`/dashboard/research/${ticker}/articles?limit=5`);
+          if (Array.isArray(data)) {
+            data.forEach((a: NewsArticle) => results.push({ ...a, ticker }));
+          }
+        } catch {}
+      })
+    );
+    return results.sort((a, b) =>
+      new Date(b.published_at).getTime() - new Date(a.published_at).getTime()
+    );
   }
 
-  const sentScore = research?.avg_sentiment_score ?? 0;
-  const sentLabel = sentScore > 0.3 ? "Positive" : sentScore < -0.3 ? "Negative" : "Neutral";
-  const SentIcon  = sentScore > 0.3 ? TrendingUp : sentScore < -0.3 ? TrendingDown : Minus;
+  async function fetchGlobalNews(): Promise<ArticleWithTicker[]> {
+    // Use a broad market ticker to get macro news
+    const macroTickers = ["NIFTY50", "SENSEX", "USDINR"];
+    const results: ArticleWithTicker[] = [];
+    await Promise.allSettled(
+      macroTickers.map(async (t) => {
+        try {
+          const { data } = await api.get(`/dashboard/research/${t}/articles?limit=8`);
+          if (Array.isArray(data)) data.forEach((a: NewsArticle) => results.push({ ...a, ticker: t }));
+        } catch {}
+      })
+    );
+    // Also try fetching from regime/macro endpoint
+    try {
+      const { data } = await api.get("/dashboard/research/GOLD/articles?limit=5");
+      if (Array.isArray(data)) data.forEach((a: NewsArticle) => globalArticles.push({ ...a, ticker: "MACRO" }));
+    } catch {}
+    return results.sort((a, b) =>
+      new Date(b.published_at).getTime() - new Date(a.published_at).getTime()
+    );
+  }
+
+  async function loadSectionA() {
+    setLoadA(true); setErrA("");
+    try {
+      const tickers = [...new Set([...NIFTY_50, ...NIFTY_500_EXTRA])].slice(0, 20);
+      const articles = await fetchArticlesForTickers(tickers);
+      setIndexArticles(articles);
+    } catch (e: any) { setErrA(getErrorMessage(e)); }
+    finally { setLoadA(false); }
+  }
+
+  async function loadSectionB() {
+    if (!holdingTickers.length) { setHoldingArticles([]); return; }
+    setLoadB(true); setErrB("");
+    try {
+      const articles = await fetchArticlesForTickers(holdingTickers);
+      setHoldingArticles(articles);
+    } catch (e: any) { setErrB(getErrorMessage(e)); }
+    finally { setLoadB(false); }
+  }
+
+  async function loadSectionC() {
+    setLoadC(true); setErrC("");
+    try {
+      const articles = await fetchGlobalNews();
+      setGlobalArticles(articles);
+    } catch (e: any) { setErrC(getErrorMessage(e)); }
+    finally { setLoadC(false); }
+  }
+
+  async function refreshAll() {
+    await Promise.all([loadSectionA(), loadSectionB(), loadSectionC()]);
+    setLastRefresh(new Date());
+  }
+
+  // Load on mount + when holdings change
+  useEffect(() => {
+    refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdingTickers.join(",")]);
+
+  // ── Holding recommendations panel ─────────────────────────────────────────
+
+  function HoldingRow({ holding }: { holding: Holding }) {
+    const myArticles = holdingArticles.filter((a) => a.ticker === holding.symbol);
+    const avg = avgSentiment(myArticles);
+    const reco = useBacktestReco(holding.symbol, avg);
+    return (
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
+        <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+          <span className="text-primary text-[9px] font-bold">{holding.symbol.slice(0,2)}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-bold">{holding.symbol}</div>
+          <div className="text-[10px] text-muted-foreground">{myArticles.length} articles today</div>
+        </div>
+        {avg != null && (
+          <span className={cn("text-[10px] font-mono font-bold", avg > 0.1 ? "text-bull" : avg < -0.1 ? "text-bear" : "text-gold")}>
+            {avg >= 0 ? "+" : ""}{avg.toFixed(3)}
+          </span>
+        )}
+        {reco && (
+          <span className={cn("text-[10px] font-bold border px-2 py-0.5 rounded-full",
+            reco.action === "BUY"        ? "text-bull bg-bull/10 border-bull/20" :
+            reco.action === "ACCUMULATE" ? "text-emerald-400 bg-emerald-400/10 border-emerald-400/20" :
+            reco.action === "SELL"       ? "text-bear bg-bear/10 border-bear/20" :
+            "text-gold bg-gold/10 border-gold/20"
+          )}>
+            {reco.action}
+          </span>
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-5 animate-fade-in">
+    <div className="space-y-6 animate-fade-in">
+
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="font-display font-bold text-xl">News Research</h1>
           <p className="text-muted-foreground text-xs mt-0.5">
-            AI-powered sentiment · FinBERT + BART · 60-min cache
+            Daily market intelligence · Auto-refreshes every morning · Sentiment scored by FinBERT
           </p>
         </div>
-        <form onSubmit={handleSearch} className="flex gap-2">
-          <div className="relative">
-            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Enter ticker…"
-              className="bg-muted/50 border border-border rounded-xl pl-8 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/30 transition-all w-36"
-            />
-          </div>
+        <div className="flex items-center gap-3">
+          {lastRefresh && (
+            <span className="text-[10px] text-muted-foreground">
+              Updated {timeAgo(lastRefresh.toISOString())}
+            </span>
+          )}
           <button
-            type="submit"
-            className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold hover:bg-primary/20 transition-all"
+            onClick={refreshAll}
+            disabled={loadA || loadB || loadC}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border text-xs text-muted-foreground hover:text-foreground hover:border-primary/30 transition-all disabled:opacity-50"
           >
-            Analyse
+            {(loadA || loadB || loadC) ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            Refresh All
           </button>
-        </form>
+        </div>
       </div>
 
-      {/* Quick ticker pills */}
-      <div className="flex gap-2 flex-wrap">
-        {NIFTY_50.map((t) => (
-          <button
-            key={t}
-            onClick={() => { setTicker(t); setInput(t); router.push(`/research?ticker=${t}`, { scroll: false }); }}
-            className={cn(
-              "px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all",
-              ticker === t
-                ? "bg-primary/15 border-primary/40 text-primary"
-                : "border-border text-muted-foreground hover:text-foreground bg-muted/30"
-            )}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
-
-      {/* Research error */}
-      {resError && !resLoading && (
-        <ErrorBanner
-          title={`❌ Failed to load research for ${ticker}`}
-          message={getErrorMessage(resError)}
-          onRetry={() => mutateRes()}
-          onDismiss={() => {}}
-        />
-      )}
-
-      {/* Inception / data quality banner */}
-      {inception?.is_inception && (
-        <InceptionBanner
-          quality={inception.quality}
-          qualityMessage={inception.quality_message}
-          isInception={inception.is_inception}
-          inceptionDate={inception.inception_date ?? undefined}
-        />
-      )}
-
-      {/* Insufficient coverage */}
-      {research?.insufficient_coverage && (
-        <div className="bg-gold/5 border border-gold/30 rounded-2xl p-4 flex gap-3">
-          <AlertTriangle size={14} className="text-gold shrink-0 mt-0.5" />
-          <p className="text-xs text-gold/80">{research.coverage_message}</p>
-        </div>
-      )}
-
-      {/* Conflict warning */}
-      {research?.conflict_detected && (
-        <div className="bg-bear/5 border border-bear/30 rounded-2xl p-4 flex gap-3">
-          <AlertTriangle size={14} className="text-bear shrink-0 mt-0.5" />
-          <div>
-            <p className="text-xs font-bold text-bear mb-1">[NEWS CONFLICT DETECTED]</p>
-            <p className="text-[10px] text-bear/70">{research.conflict_detail}</p>
-          </div>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-5">
-        {/* Left: AI insight + news feed */}
-        <div className="space-y-4">
-
-          {/* Executive insight */}
-          <div className="bg-gradient-to-br from-primary/10 to-accent/5 border border-primary/20 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-6 h-6 rounded-lg bg-primary/20 flex items-center justify-center">
-                <Sparkles size={12} className="text-primary" />
-              </div>
-              <span className="text-xs font-bold uppercase tracking-widest text-primary">
-                AI Executive Insight — {ticker}
-              </span>
-              {research && (
-                <button
-                  onClick={() => mutateRes()}
-                  className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <RefreshCw size={11} />
-                </button>
-              )}
+      {/* ── Section A: Nifty 50 + 500 ─────────────────────────────────────── */}
+      <div className="bg-card border border-border rounded-2xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border/60">
+          <SectionHeader
+            icon={<BarChart3 size={14} className="text-primary" />}
+            title="Nifty 50 & 500 — Index News"
+            subtitle="Macro & micro sentiment across benchmark stocks"
+            count={indexArticles.length}
+            loading={loadA}
+            onRefresh={loadSectionA}
+            expanded={secA}
+            onToggle={() => setSecA(!secA)}
+          />
+          {secA && indexArticles.length > 0 && (
+            <div className="mt-3">
+              <SentimentMeter articles={indexArticles} />
             </div>
-
-            {resLoading ? (
-              <LoadingOverlay
-                message={`Analysing ${ticker} with FinBERT + BART…`}
-                eta="~20–40 seconds"
-                subMessage="First load runs AI inference. Subsequent loads use 60-min cache."
-              />
-            ) : resError ? (
-              <div className="flex items-center gap-2 py-6 justify-center">
-                <WifiOff size={16} className="text-muted-foreground/40" />
-                <p className="text-xs text-muted-foreground">Analysis unavailable — backend error</p>
-              </div>
-            ) : research?.executive_summary?.length ? (
-              <ul className="space-y-3">
-                {research.executive_summary.map((bullet, i) => (
-                  <li
-                    key={i}
-                    className="flex gap-3 text-sm leading-relaxed animate-fade-in"
-                    style={{ animationDelay: `${i * 80}ms` }}
-                  >
-                    <span className="text-primary font-bold shrink-0 mt-0.5">
-                      {["①","②","③"][i] ?? "•"}
-                    </span>
-                    <span className="text-foreground/90">{bullet.replace(/^[•–]\s*/, "")}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-xs text-muted-foreground py-4 text-center">
-                No analysis available — click Analyse to generate
-              </p>
-            )}
-
-            {research?.forecast_outlook && (
-              <div className="mt-4 pt-4 border-t border-primary/20">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground">12–24 Month Outlook</span>
-                  <span className={cn("text-[9px] font-bold px-2 py-0.5 rounded-full border",
-                    research.forecast_direction === "BULLISH" ? "text-bull bg-bull/10 border-bull/20"
-                    : research.forecast_direction === "BEARISH" ? "text-bear bg-bear/10 border-bear/20"
-                    : "text-gold bg-gold/10 border-gold/20"
-                  )}>
-                    {research.forecast_direction}
-                  </span>
-                </div>
-                <p className="text-xs text-foreground/80">{research.forecast_outlook}</p>
-              </div>
-            )}
-          </div>
-
-          {/* News feed */}
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Newspaper size={13} className="text-muted-foreground" />
-              <span className="text-sm font-semibold">Latest News</span>
-              <Badge variant="neutral" size="sm">{news?.length ?? 0} articles</Badge>
-              {newsLoading && <Loader2 size={11} className="animate-spin text-muted-foreground ml-1" />}
-              <span className="ml-auto text-[9px] text-muted-foreground">Latest first</span>
-            </div>
-
-            {/* News error */}
-            {newsError && !newsLoading && (
-              <ErrorBanner
-                title="❌ Failed to fetch news articles"
-                message={getErrorMessage(newsError)}
-              />
-            )}
-
-            {newsLoading ? (
-              <LoadingOverlay
-                message="Fetching latest financial news…"
-                eta="~5–10 seconds"
-                subMessage="Scraping news sources and running FinBERT sentiment analysis"
-              />
-            ) : !news?.length && !newsLoading ? (
-              <Empty
-                icon={<Newspaper size={28} />}
-                title="No articles found"
-                description={resError
-                  ? "Analysis failed — check backend connection"
-                  : "Analysis runs automatically when you search a ticker"}
-              />
-            ) : (
-              <div className="space-y-2">
-                {(news ?? []).map((article: NewsArticle, i: number) => (
-                  <div
-                    key={i}
-                    className="bg-card border border-border rounded-xl p-3.5 hover:border-primary/20 transition-all animate-fade-in group"
-                    style={{ animationDelay: `${i * 25}ms` }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <SentimentDot score={article.sentiment_score} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-xs font-semibold text-foreground leading-snug line-clamp-2 group-hover:text-primary transition-colors">
-                            {article.title}
-                          </p>
-                          {article.url && (
-                            <a
-                              href={article.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="shrink-0 text-muted-foreground hover:text-primary transition-colors mt-0.5"
-                            >
-                              <ExternalLink size={10} />
-                            </a>
-                          )}
-                        </div>
-                        {article.description && (
-                          <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
-                            {article.description}
-                          </p>
-                        )}
-                        <div className="flex items-center gap-3 mt-2">
-                          <span className={cn(
-                            "text-[9px] font-semibold uppercase",
-                            article.source_name === "NEWSAPI" ? "text-cyan" : "text-muted-foreground"
-                          )}>
-                            {article.source_name.replace("_", " ")}
-                          </span>
-                          <span className="text-[9px] text-muted-foreground flex items-center gap-1">
-                            <Clock size={8} />
-                            {timeAgo(article.published_at)}
-                          </span>
-                          {article.sentiment_score != null && (
-                            <div className="ml-auto w-24">
-                              <ScoreBar score={article.sentiment_score} />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Sentiment + chart + forecast */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <span className="text-xs font-semibold flex items-center gap-1.5">
-                <SentIcon size={12} className={sentimentColor(sentScore)} />
-                Sentiment Analysis
-              </span>
-            </CardHeader>
-            <CardContent>
-              {resLoading ? (
-                <div className="space-y-3">
-                  {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-6 w-full" />)}
-                </div>
-              ) : resError ? (
-                <p className="text-xs text-muted-foreground text-center py-6">Unavailable</p>
-              ) : research ? (
-                <div className="space-y-4">
-                  <div className="text-center py-2">
-                    <div className={cn("text-4xl font-display font-bold", sentimentColor(sentScore))}>
-                      {sentScore >= 0 ? "+" : ""}{sentScore.toFixed(3)}
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">{sentLabel} Sentiment</div>
-                  </div>
-                  {[
-                    { label: "Positive", count: research.positive_count, color: "bg-bull", total: research.articles_analysed },
-                    { label: "Neutral",  count: research.neutral_count,  color: "bg-gold", total: research.articles_analysed },
-                    { label: "Negative", count: research.negative_count, color: "bg-bear", total: research.articles_analysed },
-                  ].map(({ label, count, color, total }) => (
-                    <div key={label}>
-                      <div className="flex justify-between text-[10px] mb-1">
-                        <span className="text-muted-foreground">{label}</span>
-                        <span className="font-mono font-semibold">{count}/{total}</span>
-                      </div>
-                      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div
-                          className={cn("h-full rounded-full transition-all", color)}
-                          style={{ width: total > 0 ? `${(count / total) * 100}%` : "0%" }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                  <div className="pt-2 border-t border-border space-y-2 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Articles analysed</span>
-                      <span className="font-mono font-semibold">{research.articles_analysed}</span>
-                    </div>
-                    {research.sentiment_std_dev != null && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Divergence (σ)</span>
-                        <span className={cn("font-mono font-semibold",
-                          research.sentiment_std_dev > 0.8 ? "text-bear" : "text-foreground"
-                        )}>
-                          {research.sentiment_std_dev.toFixed(3)}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
-
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <BarChart3 size={12} className="text-muted-foreground" />
-              <span className="text-xs font-semibold">{ticker} · Chart</span>
-            </div>
-            <CandlestickChart ticker={ticker} showEMA showBB={false} showVolume={false} height={260} />
-          </div>
-
-          {research?.forecast_direction && (
-            <Card>
-              <CardContent>
-                <div className="text-[9px] uppercase tracking-widest text-muted-foreground mb-2">Quantitative Forecast</div>
-                <div className="space-y-2.5 text-xs">
-                  {[
-                    { label: "Direction", value: research.forecast_direction,
-                      className: research.forecast_direction === "BULLISH" ? "text-bull" : research.forecast_direction === "BEARISH" ? "text-bear" : "text-gold" },
-                    { label: "Price Slope", value: research.price_slope_annual ? `${research.price_slope_annual.toFixed(1)}%/yr` : "—", className: "" },
-                    { label: "Revenue CAGR", value: research.revenue_cagr ? `${research.revenue_cagr.toFixed(1)}%` : "—", className: "" },
-                    { label: "Confidence", value: research.forecast_confidence ? `${(research.forecast_confidence * 100).toFixed(0)}%` : "—", className: "" },
-                  ].map(({ label, value, className }) => (
-                    <div key={label} className="flex justify-between">
-                      <span className="text-muted-foreground">{label}</span>
-                      <span className={cn("font-mono font-semibold", className)}>{value}</span>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
           )}
         </div>
+
+        {secA && (
+          <div className="p-4">
+            {errA && <ErrorBanner title="Failed to load index news" message={errA} onRetry={loadSectionA} />}
+            {loadA ? (
+              <div className="flex items-center gap-2 py-8 justify-center text-xs text-muted-foreground">
+                <Loader2 size={14} className="animate-spin" />
+                Fetching news for Nifty 50 & 500 stocks…
+              </div>
+            ) : indexArticles.length === 0 ? (
+              <Empty icon={<Newspaper size={24} />} title="No articles loaded" description="Click refresh to fetch today's news" />
+            ) : (
+              <div className="space-y-2">
+                {indexArticles.slice(0, 30).map((a, i) => (
+                  <ArticleCard key={i} article={a} showTicker />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* ── Section B: Holdings ───────────────────────────────────────────── */}
+      <div className="bg-card border border-border rounded-2xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border/60">
+          <SectionHeader
+            icon={<Briefcase size={14} className="text-primary" />}
+            title="My Holdings — Portfolio News"
+            subtitle="News & sentiment for stocks you own · Backtest-driven recommendations"
+            count={holdingArticles.length}
+            loading={loadB}
+            onRefresh={loadSectionB}
+            expanded={secB}
+            onToggle={() => setSecB(!secB)}
+          />
+          {secB && holdingArticles.length > 0 && (
+            <div className="mt-3">
+              <SentimentMeter articles={holdingArticles} />
+            </div>
+          )}
+        </div>
+
+        {secB && (
+          <div>
+            {errB && (
+              <div className="p-4">
+                <ErrorBanner title="Failed to load holdings news" message={errB} onRetry={loadSectionB} />
+              </div>
+            )}
+
+            {!holdingTickers.length ? (
+              <div className="p-6 text-center">
+                <Empty icon={<Briefcase size={24} />} title="No holdings uploaded" description="Upload your Zerodha CSV in Portfolio to see holding-specific news here" />
+              </div>
+            ) : loadB ? (
+              <div className="flex items-center gap-2 py-8 justify-center text-xs text-muted-foreground">
+                <Loader2 size={14} className="animate-spin" />
+                Fetching news for your {holdingTickers.length} holdings…
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 xl:grid-cols-[280px_1fr] divide-y xl:divide-y-0 xl:divide-x divide-border/40">
+
+                {/* Holdings recommendation panel */}
+                <div>
+                  <div className="px-4 py-2.5 border-b border-border/40 bg-muted/20">
+                    <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">
+                      Recommendation (Sentiment + Backtest)
+                    </p>
+                  </div>
+                  <div className="divide-y divide-border/40 max-h-[500px] overflow-y-auto">
+                    {(holdings ?? []).map((h: Holding) => (
+                      <HoldingRow key={h.symbol} holding={h} />
+                    ))}
+                  </div>
+                </div>
+
+                {/* Articles */}
+                <div className="p-4">
+                  {holdingArticles.length === 0 ? (
+                    <Empty icon={<Newspaper size={24} />} title="No articles yet" description="Articles load from the news database. Run a Force Scan or wait for the scheduler." />
+                  ) : (
+                    <div className="space-y-2">
+                      {holdingArticles.slice(0, 40).map((a, i) => (
+                        <ArticleCard key={i} article={a} showTicker />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Section C: Global News ────────────────────────────────────────── */}
+      <div className="bg-card border border-border rounded-2xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border/60">
+          <SectionHeader
+            icon={<Globe size={14} className="text-primary" />}
+            title="Global News & Macro"
+            subtitle="International events, macro indicators, and Indian market sector impact"
+            count={globalArticles.length}
+            loading={loadC}
+            onRefresh={loadSectionC}
+            expanded={secC}
+            onToggle={() => setSecC(!secC)}
+          />
+          {secC && globalArticles.length > 0 && (
+            <div className="mt-3">
+              <SentimentMeter articles={globalArticles} />
+            </div>
+          )}
+        </div>
+
+        {secC && (
+          <div className="p-4">
+            {errC && <ErrorBanner title="Failed to load global news" message={errC} onRetry={loadSectionC} />}
+            {loadC ? (
+              <div className="flex items-center gap-2 py-8 justify-center text-xs text-muted-foreground">
+                <Loader2 size={14} className="animate-spin" />
+                Fetching global market news…
+              </div>
+            ) : globalArticles.length === 0 ? (
+              <div className="space-y-4">
+                <Empty icon={<Globe size={24} />} title="No global articles loaded" description="Click refresh to fetch macro and global news" />
+                <div className="bg-muted/20 border border-border/40 rounded-xl p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold mb-3">
+                    Tracked Global Themes
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {GLOBAL_QUERIES.map((q) => (
+                      <span key={q} className="text-[10px] bg-muted/60 border border-border/40 text-muted-foreground px-2 py-1 rounded-lg">
+                        {q}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {globalArticles.slice(0, 25).map((a, i) => (
+                  <ArticleCard key={i} article={a} showSectors />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
     </div>
   );
 }
