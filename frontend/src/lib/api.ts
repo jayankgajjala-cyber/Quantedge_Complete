@@ -1,15 +1,3 @@
-/**
- * api.ts — Axios clients + error utilities
- *
- * Two clients:
- *   api      – 30s timeout   (reads, mutations, uploads)
- *   apiSlow  – 120s timeout  (backtest, full-portfolio scans)
- *
- * Both clients:
- *   - attach JWT from localStorage on every request
- *   - redirect to /login on 401
- *   - never silently swallow errors
- */
 import axios, { AxiosError } from "axios";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -24,7 +12,6 @@ export const apiSlow = axios.create({
   timeout: 120_000,
 });
 
-// ── Token helpers ─────────────────────────────────────────────────────────────
 function getStoredToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -50,7 +37,6 @@ function clearStoredToken(): void {
   } catch { /* ignore */ }
 }
 
-// ── Interceptors ──────────────────────────────────────────────────────────────
 function attachAuth(config: any) {
   const token = getStoredToken();
   if (token) config.headers.Authorization = `Bearer ${token}`;
@@ -70,15 +56,9 @@ apiSlow.interceptors.request.use(attachAuth);
 api.interceptors.response.use((r) => r, on401);
 apiSlow.interceptors.response.use((r) => r, on401);
 
-// ── Error extraction ──────────────────────────────────────────────────────────
-/**
- * Returns a human-readable error string from any axios error.
- * Works for network errors (CORS, backend down), 4xx, 5xx, and validation.
- */
 export function getErrorMessage(err: any): string {
   if (!err) return "Unknown error";
 
-  // FastAPI HTTPException → detail field
   if (err.response?.data?.detail) {
     const d = err.response.data.detail;
     if (typeof d === "string") return d;
@@ -86,15 +66,12 @@ export function getErrorMessage(err: any): string {
     return String(d);
   }
 
-  // Structured backend error
   if (err.response?.data?.message) return String(err.response.data.message);
 
-  // Timeout
   if (err.code === "ECONNABORTED") {
     return "Request timed out — the backend is taking too long. Try again or check backend health.";
   }
 
-  // Network error (CORS blocked, backend unreachable, no internet)
   if (!err.response) {
     return (
       `Cannot reach backend (${API_BASE}). ` +
@@ -104,7 +81,6 @@ export function getErrorMessage(err: any): string {
     );
   }
 
-  // HTTP status codes
   switch (err.response.status) {
     case 400: return `Bad request: ${err.response.data?.detail ?? "check your input"}`;
     case 403: return "Access denied";
@@ -118,14 +94,13 @@ export function getErrorMessage(err: any): string {
   }
 }
 
-// ── Auth helpers ──────────────────────────────────────────────────────────────
 export async function stepOneLogin(username: string, password: string) {
-  const { data } = await api.post("/auth/login", { username, password });
+  const { data } = await apiSlow.post("/auth/login", { username, password });
   return data;
 }
 
 export async function stepTwoVerifyOTP(username: string, otp: string) {
-  const { data } = await api.post("/auth/verify-otp", { username, otp });
+  const { data } = await apiSlow.post("/auth/verify-otp", { username, otp });
   return data;
 }
 

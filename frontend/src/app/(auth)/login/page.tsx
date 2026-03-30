@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Lock, User, Shield, ArrowRight, Loader2, Eye, EyeOff } from "lucide-react";
-import { stepOneLogin, stepTwoVerifyOTP } from "@/lib/api";
+import { stepOneLogin, stepTwoVerifyOTP, getErrorMessage } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -12,12 +12,12 @@ type Step = "password" | "otp";
 export default function LoginPage() {
   const router    = useRouter();
   const setToken  = useAuthStore((s) => s.setToken);
-  const [step, setStep]         = useState<Step>("password");
-  const [username, setUsername] = useState("Jayank8294");
-  const [password, setPassword] = useState("");
-  const [otp, setOtp]           = useState("");
-  const [loading, setLoading]   = useState(false);
-  const [showPw, setShowPw]     = useState(false);
+  const [step, setStep]           = useState<Step>("password");
+  const [username, setUsername]   = useState("Jayank8294");
+  const [password, setPassword]   = useState("");
+  const [otp, setOtp]             = useState("");
+  const [loading, setLoading]     = useState(false);
+  const [showPw, setShowPw]       = useState(false);
   const [emailHint, setEmailHint] = useState("");
 
   async function handlePasswordSubmit(e: React.FormEvent) {
@@ -29,8 +29,7 @@ export default function LoginPage() {
       setStep("otp");
       toast.success("OTP sent!", { description: `Check ${res.email_hint}` });
     } catch (err: any) {
-      const detail = getErrorMessage(err);
-      toast.error(detail);
+      toast.error(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -45,8 +44,7 @@ export default function LoginPage() {
       toast.success("Welcome back, " + res.username);
       router.replace("/");
     } catch (err: any) {
-      const detail = getErrorMessage(err);
-      toast.error(detail);
+      toast.error(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -54,12 +52,10 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4 overflow-hidden relative">
-      {/* Atmospheric background */}
       <div className="absolute inset-0 scanline pointer-events-none" />
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] rounded-full bg-primary/5 blur-[120px] pointer-events-none" />
       <div className="absolute bottom-0 right-0 w-[400px] h-[300px] rounded-full bg-accent/5 blur-[100px] pointer-events-none" />
 
-      {/* Grid lines */}
       <div className="absolute inset-0 pointer-events-none"
         style={{
           backgroundImage: `linear-gradient(rgba(0,196,125,0.04) 1px, transparent 1px),
@@ -68,7 +64,6 @@ export default function LoginPage() {
         }} />
 
       <div className="relative w-full max-w-[420px] animate-fade-in">
-        {/* Logo */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2 mb-3">
             <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center">
@@ -79,9 +74,7 @@ export default function LoginPage() {
           <p className="text-muted-foreground text-sm">Institutional Trading Intelligence</p>
         </div>
 
-        {/* Card */}
         <div className="glass rounded-2xl p-8">
-          {/* Step indicator */}
           <div className="flex items-center gap-3 mb-8">
             {(["password", "otp"] as Step[]).map((s, i) => (
               <div key={s} className="flex items-center gap-2">
