@@ -1,71 +1,51 @@
-# ═══════════════════════════════════════════════════════════════════
-#  Quantedge Trading System — Requirements v9.4
-#  Python 3.11 (matches Dockerfile: FROM python:3.11-slim)
-#
-#  KEY PINS & REASONS
-#  ──────────────────
-#  bcrypt==3.2.2        passlib 1.7.4 reads bcrypt.__about__ at import
-#                       time; bcrypt>=4.0 removed that attr → AttributeError
-#                       at startup. MUST stay at 3.x until passlib is replaced.
-#
-#  apscheduler==3.10.4  APScheduler 4.x is a full rewrite with breaking API.
-#                       AsyncIOScheduler, add_job, add_listener are 3.x APIs.
-#                       Do NOT upgrade to 4.x without a full scheduler rewrite.
-#
-#  pydantic==2.7.1      models/schemas.py uses @validator (v1 compat API).
-#                       Pydantic v2 still supports it but emits DeprecationWarning.
-#                       Safe to keep; migrate @validator → @field_validator when ready.
-#
-#  yfinance==0.2.54     0.2.40 had silent data gaps with fast_info on NSE tickers.
-#                       0.2.54 is latest stable with no breaking API changes to
-#                       .history(), .fast_info, .info, set_tz_cache_location().
-# ═══════════════════════════════════════════════════════════════════
-
-# ── Core Framework ───────────────────────────────────────────────
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.111.0
-uvicorn[standard]==0.29.0
-pydantic==2.7.1
-pydantic-settings==2.3.4
-python-multipart==0.0.9       # required by FastAPI for UploadFile / File(...)
-aiofiles==23.2.1
+uvicorn[standard]==0.30.1
 
-# ── Database ─────────────────────────────────────────────────────
-sqlalchemy==2.0.30
-alembic==1.13.1
-psycopg2-binary==2.9.9        # bundled libpq — no system libpq needed beyond Dockerfile gcc/libpq-dev
-
-# ── Auth & Security ──────────────────────────────────────────────
+# ── Auth / security ───────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+bcrypt==4.0.1
 passlib[bcrypt]==1.7.4
-bcrypt==3.2.2                 # MUST stay at 3.x — see note above
-PyJWT==2.8.0
-httpx==0.27.0                 # used by core/auth.py for Resend OTP API (AsyncClient)
-python-dotenv==1.0.1
+python-multipart==0.0.9
 
-# ── Data & Numerics ──────────────────────────────────────────────
-yfinance==0.2.54              # bumped from 0.2.40 — fixes fast_info gaps on NSE tickers
-pandas==2.2.2
-numpy==1.26.4
-scipy==1.13.0
-scikit-learn==1.5.0           # used by news_service.py (LinearRegression for price slope)
-pyarrow==16.1.0               # required for pandas .to_parquet() / .read_parquet()
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.3.0
+typing-extensions==4.12.2
 
-# ── Timezone Data ────────────────────────────────────────────────
-tzdata==2024.1                # REQUIRED on python:3.11-slim — slim image strips /usr/share/zoneinfo
-                              # Without this, ZoneInfo("Asia/Kolkata") raises ZoneInfoNotFoundError
-                              # and the APScheduler Asia/Kolkata TZ config fails at startup
+# ── Supabase + Neon (PostgreSQL) — SQLAlchemy async ──────────────────────────
+sqlalchemy==2.0.30
+asyncpg==0.29.0          # async PostgreSQL driver (both Supabase and Neon)
+psycopg2-binary==2.9.9   # sync driver — required by Alembic migrations
+alembic==1.13.1
 
-# ── Web Scraping ─────────────────────────────────────────────────
-requests==2.32.3
+# ── MongoDB — raw news archive ────────────────────────────────────────────────
+motor==3.4.0              # async MongoDB driver (wraps pymongo)
+pymongo==4.7.3
+
+# ── HTTP / feeds ──────────────────────────────────────────────────────────────
+aiohttp==3.9.5
+httpx==0.27.0
+feedparser==6.0.11
 beautifulsoup4==4.12.3
-lxml==5.2.2                   # bs4 HTML parser backend used in data_manager.py and news_service.py
-cloudscraper==1.2.71          # used in data_manager.py for Moneycontrol scraping
 
-# ── TradingView ──────────────────────────────────────────────────
-tradingview-ta==3.3.0         # used in data_manager.py for TV signal confirmation
+# ── FinBERT — HuggingFace Transformers ───────────────────────────────────────
+# OCI ARM Free Tier: use CPU-only torch to avoid OOM.
+# If running on GPU instance, replace with the matching CUDA wheel.
+torch==2.3.1
+transformers==4.41.2
 
-# ── Scheduling ───────────────────────────────────────────────────
-apscheduler==3.10.4           # MUST stay at 3.x — see note above
+# ── VADER sentiment baseline ──────────────────────────────────────────────────
+vaderSentiment==3.3.2
 
-# ── Testing ──────────────────────────────────────────────────────
-pytest==8.2.2
-pytest-asyncio==0.23.7        # async test support; requires asyncio_mode="auto" in pytest config
+# ── Market data ───────────────────────────────────────────────────────────────
+pandas==2.2.2
+yfinance==0.2.40
+finnhub-python==2.4.20
+nsepython==2.8
+
+# ── Email (OTP) ───────────────────────────────────────────────────────────────
+resend==0.8.0
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
